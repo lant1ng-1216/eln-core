@@ -1,0 +1,99 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>ELN Core — Browser Example</title>
+<style>
+  body { font-family: monospace; padding: 24px; max-width: 800px; margin: 0 auto; }
+  #output { white-space: pre-wrap; background: #f5f5f5; padding: 16px; border-radius: 8px; min-height: 200px; }
+  button { padding: 8px 16px; margin: 4px; cursor: pointer; }
+  input  { padding: 6px 10px; width: 300px; }
+  .log   { color: #666; font-size: 12px; }
+</style>
+</head>
+<body>
+<h2>ELN Core — Browser Demo</h2>
+
+<div>
+  <input id="api-key" type="password" placeholder="DeepSeek API Key (sk-...)" />
+</div>
+<br>
+<button onclick="generate('republican')">Generate: 民国谍战</button>
+<button onclick="generate('mystery')">Generate: 现代悬疑</button>
+<button onclick="runTurn()">Run Turn ▶</button>
+<button onclick="saveSnap()">Snapshot</button>
+<button onclick="rewind()">Rewind ↩</button>
+<hr>
+<div id="output">Waiting...</div>
+
+<script type="module">
+  // In production: import from npm package
+  // import { ELNRuntime } from 'eln-core'
+  //
+  // For this demo we load from relative path:
+  import { ELNRuntime } from '../index.js';
+
+  let eln = null;
+
+  function getRuntime() {
+    const key = document.getElementById('api-key').value.trim();
+    if (!key) { alert('Enter your API key first'); return null; }
+    if (!eln || eln._client.apiKey !== key) {
+      eln = new ELNRuntime({
+        apiKey: key,
+        onToken: token => {
+          document.getElementById('output').textContent += token;
+        },
+        onTurnEnd: result => {
+          log(`\n── Summary: ${result.summary}`);
+          log(`── Tension: ${result.worldState.tension} | Location: ${result.worldState.location}`);
+          if (result.suggestClose) log('⚠ Story beat ready to close');
+        },
+      });
+    }
+    return eln;
+  }
+
+  function log(msg) {
+    document.getElementById('output').textContent += '\n' + msg + '\n';
+  }
+
+  window.generate = async (template) => {
+    const runtime = getRuntime(); if (!runtime) return;
+    document.getElementById('output').textContent = 'Generating world...\n';
+    try {
+      const world = await runtime.generateWorld(template);
+      runtime.loadWorld(world);
+      log(`\nWorld: ${world.name} (${world.tag})`);
+      log(`Characters: ${world.characters.map(c => c.name).join(', ')}`);
+      log(`Chapters: ${world.chapters.map(c => c.name).join(' → ')}`);
+      log('\nReady. Click "Run Turn" to start.\n');
+    } catch(e) { log('Error: ' + e.message); }
+  };
+
+  window.runTurn = async () => {
+    const runtime = getRuntime(); if (!runtime) return;
+    if (!runtime.isWorldLoaded) { log('Generate a world first.'); return; }
+    document.getElementById('output').textContent = '';
+    try {
+      await runtime.runTurn();
+    } catch(e) { log('Error: ' + e.message); }
+  };
+
+  window.saveSnap = () => {
+    const runtime = getRuntime(); if (!runtime) return;
+    const snap = runtime.saveSnapshot();
+    log(`Snapshot saved at turn ${snap.turn}`);
+  };
+
+  window.rewind = () => {
+    const runtime = getRuntime(); if (!runtime) return;
+    try {
+      runtime.rewindTo();
+      log('Rewound to previous snapshot');
+      log('Current turn: ' + runtime.getState().worldState.turn);
+    } catch(e) { log(e.message); }
+  };
+</script>
+</body>
+</html>

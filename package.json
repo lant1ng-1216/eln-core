@@ -1,0 +1,29 @@
+{
+  "name": "eln-core",
+  "version": "0.1.0",
+  "description": "Open-source Agentic Story World Runtime — the narrative engine powering ELN",
+  "type": "module",
+  "main": "index.js",
+  "exports": {
+    ".": "./index.js"
+  },
+  "keywords": [
+    "ai", "agent", "story", "narrative", "llm",
+    "world-engine", "interactive-fiction", "generative"
+  ],
+  "author": "lant1ng-1216",
+  "license": "Apache-2.0",
+  "engines": {
+    "node": ">=18"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/lant1ng-1216/eln-core.git"
+  },
+  "files": [
+    "index.js",
+    "src/",
+    "examples/",
+    "README.md"
+  ]
+}
