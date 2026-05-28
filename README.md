@@ -28,7 +28,7 @@ It is **UI-agnostic**. Bring your own frontend — chat bubble, novel reader, ga
 ## Install
 
 ```bash
-npm install eln-core
+npm install @lant1ng/eln-core
 ```
 
 Or use directly in the browser:
