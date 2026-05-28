@@ -1,329 +1,182 @@
 # eln-core
 
-**Open-source Agentic Story World Runtime**
+**开源 AI 叙事世界引擎**
 
-The narrative engine behind [ELN · 空镜叙事](https://eln-app.vercel.app) — extracted, documented, and ready to build on.
+[ELN · 空镜叙事](https://eln-app.vercel.app) 的核心 Runtime，已提炼为独立开源库。
 
 ```
-World State → Prompt Engineering → Streaming Narrative → State Extraction → Loop
+世界状态 → Prompt工程 → 流式叙事 → 状态提取 → 循环
 ```
 
 ---
 
-## What this is
+## 这是什么
 
-`eln-core` is the runtime that powers AI-driven persistent story worlds. It handles:
+`eln-core` 是驱动 AI 持久化故事世界的运行时引擎，负责：
 
-- **World generation** — LLM generates world background, characters, chapters from a template or free-form prompt
-- **Turn engine** — each turn streams narrative prose, then silently extracts state changes (emotions, trust, location, tension)
-- **Character agents** — each character has personality, goals, secrets, and dynamic trust relationships
-- **God-mode controls** — inject events, force secret reveals, set per-character directives
-- **Snapshots & rewind** — branch timelines, rewind to any saved state
-- **Persistence** — save/load worlds from localStorage (browser) or your own storage
+- **世界生成** — 从模板或自定义描述生成世界背景、角色、章节
+- **回合引擎** — 每回合流式输出叙事散文，再静默提取状态变化（情绪、信任、地点、张力）
+- **角色智能体** — 每个角色拥有性格、目标、秘密和动态信任关系
+- **上帝模式** — 注入事件、强制秘密揭露、给角色下达专属指令
+- **快照与回溯** — 创建世界线分支，随时回溯到任意存档
+- **持久化** — 存取世界存档（浏览器 localStorage 或自定义存储）
 
-It is **UI-agnostic**. Bring your own frontend — chat bubble, novel reader, game map, whatever.
+**UI 无关**。自带任意前端——对话气泡、小说阅读器、游戏地图均可。
 
 ---
 
-## Install
+## 安装
 
 ```bash
 npm install @lant1ng/eln-core
 ```
 
-Or use directly in the browser:
+或在浏览器中直接使用：
 
 ```html
 <script type="module">
-  import { ELNRuntime } from 'https://esm.sh/eln-core'
+  import { ELNRuntime } from 'https://esm.sh/@lant1ng/eln-core'
 </script>
 ```
 
 ---
 
-## Quick Start
+## 快速上手
 
 ```js
-import { ELNRuntime } from 'eln-core'
+import { ELNRuntime } from '@lant1ng/eln-core'
 
 const eln = new ELNRuntime({
-  apiKey: 'sk-your-key-here',   // DeepSeek, OpenAI, or any compatible API
+  apiKey: 'sk-你的密钥',
 
-  // Receive streamed tokens in real time
+  // 实时接收流式 token
   onToken: token => process.stdout.write(token),
 
-  // Called when each turn fully completes
+  // 每回合完成后触发
   onTurnEnd: result => {
-    console.log('Summary:', result.summary)
-    console.log('Tension:', result.worldState.tension)
+    console.log('摘要:', result.summary)
+    console.log('张力:', result.worldState.tension)
   },
 })
 
-// 1. Generate a world
+// 1. 生成世界
 const world = await eln.generateWorld('republican')  // 民国谍战
 eln.loadWorld(world)
 
-// 2. Run a turn
+// 2. 运行一回合
 await eln.runTurn()
 
-// 3. God-mode: inject an event next turn
+// 3. 上帝模式：注入事件
 await eln.runTurn({ intervention: '一封神秘信件突然出现在桌上' })
 
-// 4. Force a character to reveal their secret
+// 4. 强制角色透露秘密
 eln.forceSecretReveal('李明远', '谢云舒')
 await eln.runTurn()
 
-// 5. Advance to next chapter
+// 5. 推进下一章
 eln.nextChapter('聚焦两人之间的信任危机')
 ```
 
 ---
 
-## API Reference
-
-### `new ELNRuntime(options)`
-
-| Option | Type | Default | Description |
-|---|---|---|---|
-| `apiKey` | `string` | **required** | LLM API key |
-| `model` | `string` | `deepseek-chat` | Model identifier |
-| `apiBase` | `string` | `https://api.deepseek.com` | API base URL |
-| `onToken` | `(token: string) => void` | — | Streaming token callback |
-| `onLine` | `(line: string) => void` | — | Completed line callback |
-| `onTurnEnd` | `(result: TurnResult) => void` | — | Turn completion callback |
-
----
-
-### World Generation
+## 自定义世界
 
 ```js
-// From built-in template
+// 方式一：使用内置模板
 const world = await eln.generateWorld('ancient')
 
-// From free-form prompt
-const world = await eln.generateWorld(null, '三个间谍在民国上海互相不知道对方身份')
+// 方式二：自由描述
+const world = await eln.generateWorld(null, '三个AI科学家在火星基地，其中一个是卧底')
 
-// Load into runtime
+// 方式三：生成后手动修改角色
+world.characters[0].secret = '我其实是地球派来监视你们的'
+world.characters[0].goal = '在三个月内获取核心算法'
 eln.loadWorld(world)
 ```
 
-**Built-in templates:** `ancient` · `republican` · `mystery` · `xianxia` · `campus` · `apocalypse`
-
-You can also pass any string as `templateKey` — it's injected directly into the prompt.
+**内置模板：** `ancient`（古代权谋）· `republican`（民国谍战）· `mystery`（现代悬疑）· `xianxia`（架空修仙）· `campus`（校园青春）· `apocalypse`（末世求生）
 
 ---
 
-### Turn Execution
+## API 参考
+
+### `new ELNRuntime(options)`
+
+| 参数 | 类型 | 默认值 | 说明 |
+|---|---|---|---|
+| `apiKey` | `string` | **必填** | LLM API 密钥 |
+| `model` | `string` | `deepseek-chat` | 模型名称 |
+| `apiBase` | `string` | `https://api.deepseek.com` | API 地址 |
+| `onToken` | `(token) => void` | — | 流式 token 回调 |
+| `onLine` | `(line) => void` | — | 完整行回调 |
+| `onTurnEnd` | `(result) => void` | — | 回合完成回调 |
+
+### 主要方法
 
 ```js
-const result = await eln.runTurn({
-  intervention: 'Optional god-mode event string',
-})
+// 世界
+await eln.generateWorld(templateKey, userPrompt)
+eln.loadWorld(generatedWorld)
 
-// result shape:
-{
-  narrativeText: string,      // Full narrative prose from LLM
-  worldState:    WorldState,  // Updated world state
-  characters:    Character[], // Updated characters
-  chapters:      Chapter[],
-  secretReveals: Array,       // Any secrets revealed this turn
-  editorNote:    string|null, // LLM's 15-char editorial comment
-  suggestClose:  boolean,     // Whether LLM suggests closing the beat
-  summary:       string,      // One-line summary
-}
+// 回合
+await eln.runTurn({ intervention: '...' })
+
+// 上帝模式
+eln.setCharDirective(characterName, directive)
+eln.forceSecretReveal(fromName, toName)
+eln.nextChapter(hint)
+
+// 快照
+eln.saveSnapshot()
+eln.rewindTo(index)
+
+// 存档
+eln.save(userId)
+ELNRuntime.getSavedWorlds(userId)
+
+// 状态读取
+eln.getState()  // { worldState, characters, chapters, turns, snapshots }
 ```
 
 ---
 
-### God Mode
+## 换用其他模型
 
-```js
-// Inject an event into next turn
-await eln.runTurn({ intervention: '地震突然发生' })
-
-// Give a character a one-shot directive
-eln.setCharDirective('角色名', '本回合保持沉默，暗中观察')
-
-// Force secret reveal
-eln.forceSecretReveal('李明远', '谢云舒')
-```
-
----
-
-### Chapter Management
-
-```js
-// Advance to next chapter (returns false if story is complete)
-const advanced = eln.nextChapter('下一章聚焦：叛徒身份揭露')
-```
-
----
-
-### Snapshots
-
-```js
-// Save current state
-const snap = eln.saveSnapshot()
-
-// Rewind to last snapshot
-eln.rewindTo()
-
-// Rewind to specific snapshot index
-eln.rewindTo(0)
-```
-
----
-
-### Persistence
-
-```js
-// Save to localStorage (browser)
-eln.save('user-123')
-
-// Load saved worlds
-const worlds = ELNRuntime.getSavedWorlds('user-123')
-```
-
----
-
-### Using Your Own LLM
-
-`eln-core` uses the OpenAI chat completions format. Any compatible endpoint works:
+`eln-core` 使用 OpenAI 兼容接口，支持任意模型：
 
 ```js
 // OpenAI
-const eln = new ELNRuntime({
-  apiKey: 'sk-...',
-  apiBase: 'https://api.openai.com',
-  model: 'gpt-4o',
-})
+new ELNRuntime({ apiKey: 'sk-...', apiBase: 'https://api.openai.com', model: 'gpt-4o' })
 
-// Moonshot (Kimi)
-const eln = new ELNRuntime({
-  apiKey: 'sk-...',
-  apiBase: 'https://api.moonshot.cn/v1',
-  model: 'moonshot-v1-8k',
-})
+// Moonshot（Kimi）
+new ELNRuntime({ apiKey: 'sk-...', apiBase: 'https://api.moonshot.cn/v1', model: 'moonshot-v1-8k' })
 
-// Local Ollama
-const eln = new ELNRuntime({
-  apiKey: 'ollama',
-  apiBase: 'http://localhost:11434/v1',
-  model: 'qwen2.5:14b',
-})
+// 本地 Ollama
+new ELNRuntime({ apiKey: 'ollama', apiBase: 'http://localhost:11434/v1', model: 'qwen2.5:14b' })
 ```
 
 ---
 
-### Lower-Level API
+## 示例
 
-If you want full control, use the building blocks directly:
-
-```js
-import {
-  buildWorldGenPrompt,
-  buildNarrativePrompt,
-  buildStateUpdatePrompt,
-  initFromGeneratedWorld,
-  applyStateUpdate,
-  advanceChapter,
-  createSnapshot,
-  LLMClient,
-} from 'eln-core'
-```
+- [`examples/node-basic.js`](examples/node-basic.js) — Node.js 最小示例
+- [`examples/browser-demo.html`](examples/browser-demo.html) — 浏览器直接打开的 Demo
+- [ELN App](https://eln-app.vercel.app) — 基于本引擎构建的完整产品
 
 ---
 
-## Data Structures
+## 许可证
 
-### `WorldState`
-```ts
-{
-  id: string
-  name: string
-  background: string
-  outline: string
-  turn: number
-  currentChapter: number
-  time: string
-  location: string
-  tension: number          // 0–100
-  _nextChapterHint: string
-}
-```
-
-### `Character`
-```ts
-{
-  name: string
-  role: string
-  personality: string
-  secret: string
-  goal: string
-  weightTag: string        // 男主|女主|男二|女二|反派|隐藏角色
-  trigger: string          // ai|alone|secret|tension|emotion
-  alive: boolean
-  emotion: string
-  trustWith: Record<string, number>  // 0–100 per character
-}
-```
-
-### `Chapter`
-```ts
-{
-  id: number
-  name: string
-  goal: string
-  targetTurns: number
-  completedTurns: number
-  status: 'active' | 'locked' | 'done'
-  beats: Array
-}
-```
+Apache-2.0 — 商业使用友好。
 
 ---
 
-## Extending
+## 贡献
 
-### Custom Prompts
+欢迎 Issue 和 PR，详见 [CONTRIBUTING.md](CONTRIBUTING.md)。
 
-Override any prompt by building on the exported builders:
-
-```js
-import { buildNarrativePrompt } from 'eln-core'
-
-function myPrompt(worldState, characters, chapters, turns, options) {
-  const base = buildNarrativePrompt(worldState, characters, chapters, turns, options)
-  return base + '\n\nAdditional constraint: write in the style of Raymond Chandler.'
-}
-```
-
-### Custom Storage
-
-`saveWorld` / `loadWorlds` use `localStorage` by default. For server-side storage, use `createSnapshot` / `restoreSnapshot` directly and persist the JSON yourself.
-
----
-
-## Examples
-
-- [`examples/node-basic.js`](examples/node-basic.js) — Minimal Node.js usage
-- [`examples/browser-demo.html`](examples/browser-demo.html) — Drop-in browser demo
-- [ELN App](https://eln-app.vercel.app) — Full production UI built on this runtime
-
----
-
-## License
-
-Apache-2.0 — commercial use welcome.
-
----
-
-## Contributing
-
-Issues and PRs welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
-
-The most useful contributions right now:
-- Additional language support (English, Japanese prompts)
-- Alternative LLM prompt styles
-- Example worlds and templates
-- Server-side storage adapters (Redis, Postgres, etc.)
+目前最欢迎的贡献：
+- 英文 / 日文 prompt 风格
+- 其他存储适配器（Redis、Postgres、Cloudflare KV 等）
+- 更多世界模板
+- 不同模型的测试配置
