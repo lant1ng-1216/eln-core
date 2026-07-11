@@ -161,7 +161,7 @@ new ELNRuntime({ apiKey: 'ollama', apiBase: 'http://localhost:11434/v1', model: 
 
 - [`examples/node-basic.js`](examples/node-basic.js) — Node.js 最小示例
 - [`examples/browser-demo.html`](examples/browser-demo.html) — 浏览器直接打开的 Demo
-- [ELN App](https://eln-app.vercel.app) — 基于本引擎构建的完整产品
+- [ELN App demo ](https://eln-app.vercel.app) — 基于本引擎构建的测试产品
 
 ---
 
