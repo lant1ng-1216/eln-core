@@ -2,7 +2,7 @@
 
 **开源 AI 叙事世界引擎**
 
-[ELN · 空镜叙事](https://eln-app.vercel.app) 的核心 Runtime，已提炼为独立开源库。
+[ELN · 空镜叙事] 的核心 Runtime，已提炼为独立开源库。
 
 ```
 世界状态 → Prompt工程 → 流式叙事 → 状态提取 → 循环
