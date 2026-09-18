@@ -17,13 +17,19 @@ import { LocalStorageStorage } from './localstorage-storage.js';
  * This is what keeps `save()` working on the server instead of throwing the
  * `ReferenceError` 0.1.0 hit.
  *
+ * The check requires a browser-ish global rather than merely probing for
+ * `localStorage`: Node 22+ exposes an experimental `localStorage` that warns on
+ * use and may be backed by a temp file, so `typeof localStorage !== 'undefined'`
+ * would silently pick the wrong backend on a server. Pass an adapter explicitly
+ * if you want disk or database persistence on Node.
+ *
  * @returns {import('./memory-storage.js').StorageAdapter}
  */
 export function createDefaultStorage() {
-  const ls = globalThis.localStorage;
-  if (ls && typeof ls.getItem === 'function') {
+  const browserStorage = typeof window !== 'undefined' ? window.localStorage : undefined;
+  if (browserStorage && typeof browserStorage.getItem === 'function') {
     try {
-      return new LocalStorageStorage(ls);
+      return new LocalStorageStorage(browserStorage);
     } catch {
       // Fall through to memory on any environment quirk.
     }

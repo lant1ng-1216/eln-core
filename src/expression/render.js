@@ -271,6 +271,8 @@ export function assembleContext({
     visibleFactIds: view.visibleFacts.map(f => f.id),
     hiddenFactIds: view.hiddenFacts.map(f => f.id),
     hiddenSecretIds: hiddenSecrets(view).map(f => f.id),
+    /** Which past turns retrieval resurfaced — lets a caller verify "it looked back". */
+    retrievedTurns: (retrieved ?? []).map(r => r.turn),
   };
 
   return fitted;
