@@ -23,7 +23,8 @@ Canon（客观真相） ──投影──▶ Mind（各主体私有视角）─
 |---|---|
 | **信息差** | 状态分两层：`Canon` 是客观真相，`Mind` 是每个角色各自知道/怀疑/误信的东西。`Mind` 不是 `Canon` 的子集，而是**可以出错的映射**——误会、谎言、戏剧反讽由此自然涌现。 |
 | **长期记忆** | 正文逐回合留存并可检索，事件账本记录"真正发生了什么"及其因果链，伏笔账本追踪埋下的线是否回收。第 6 回合仍能引用第 2 回合的细节。 |
-| **导演层** | 每回合先规划 `BeatSpec`：必须推进谁的目标、必须处理哪条伏笔、张力目标、收尾钩子。给的是**戏剧指令**，不是文风指令。 |
+| **导演层** | 每回合先规划 `BeatSpec`：必须推进谁的目标、必须处理哪条伏笔、张力目标、收尾钩子。给的是**戏剧指令**，不是文风指令。逾期的伏笔会升级为硬性要求，直到被回收。 |
+| **章节自收尾** | 章节按判据收尾：承诺回收的伏笔已回收、目标已达成，或回合预算耗尽。不需要你记得调用 `nextChapter()`。 |
 | **视角可切换** | `director`（看全量真相）与 `character`（只看该角色所知）是同一次投影，只换 `holderId`。 |
 | **回合即事务** | 任一步失败则整回合回滚，计数器绝不漂移。 |
 
@@ -123,6 +124,10 @@ await eln.generateWorld({ prompt: '三个AI科学家在火星基地，其中一�
 | `retriever` | `Retriever` | `KeywordRetriever` | 检索适配器（可换向量检索） |
 | `onToken` / `onLine` | `(token) => void` | — | 流式回调 |
 | `onTurnEnd` / `onEvent` | `(result) => void` | — | 回合 / 事件回调 |
+| `onChapterEnd` | `({reason, from, to, index}) => void` | — | 章节自动收尾时触发 |
+
+> `models.director` 是可选的：配置后会用一个便宜模型补上规则无法决定的"本回合该制造什么阻碍"，
+> 失败也不影响回合。不配置则导演完全走确定性规划。
 
 ### 世界与回合
 
@@ -140,8 +145,20 @@ eln.getState({ perspective: holderId })      // 该角色的视角视图
 eln.setCharDirective('李明远', '本回合必须怀疑谢云舒')
 eln.forceSecretReveal('李明远', '谢云舒')
 eln.plantSeed('那封没寄出的信')               // 主动埋一条伏笔
-eln.nextChapter('聚焦两人之间的信任危机')     // 返回 false 表示故事已完结
+eln.nextChapter('聚焦两人之间的信任危机')     // 覆盖手段；章节本就会按判据自动收尾
 eln.injectWorldEvent('城外传来爆炸声')        // 只改世界，不让任何角色凭空知情
+```
+
+章节自动收尾时可以接住：
+
+```js
+new ELNRuntime({
+  apiKey,
+  onChapterEnd: ({ reason, from, to }) => {
+    // reason: 'criteria' | 'budget' | 'editor'
+    console.log(`《${from}》收尾（${reason}），进入《${to}》`)
+  },
+})
 ```
 
 ### 记忆与检索

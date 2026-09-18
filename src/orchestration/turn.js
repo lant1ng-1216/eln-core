@@ -21,7 +21,8 @@ import { compose, buildExtractionPrompt } from '../expression/compose.js';
 import { applyDelta } from '../state/commit.js';
 import { cloneCanon } from '../state/canon.js';
 import { cloneMinds } from '../state/mind.js';
-import { cloneLedgers, openSeeds } from '../state/ledger.js';
+import { cloneLedgers, openSeeds, addEvent } from '../state/ledger.js';
+import { maybeCloseChapter } from '../state/chapter.js';
 import { extractWithRepair } from './repair.js';
 import { planBeat } from './director.js';
 import { makeIdFactory, currentChapter } from '../state/canon.js';
@@ -136,7 +137,7 @@ export async function runTurn({
   const canon = state.canon;
 
   // ── 1. Director plans the beat ──
-  const beatSpec = planBeat(director, {
+  let beatSpec = planBeat(director, {
     canon,
     ledgers: state.ledgers,
     mode,
@@ -147,6 +148,17 @@ export async function runTurn({
   // with the director's own constraints rather than becoming a separate block.
   if (extraNotes?.length) {
     beatSpec.constraintNotes = [...beatSpec.constraintNotes, ...extraNotes];
+  }
+
+  // Optional: let a cheap model add the parts a rule cannot decide. Never
+  // load-bearing — `enrich` returns the deterministic beat on any failure.
+  if (typeof director?.enrich === 'function') {
+    beatSpec = await director.enrich(beatSpec, {
+      canon,
+      ledgers: state.ledgers,
+      mode,
+      holderId,
+    });
   }
 
   // ── 2. Assemble the projected context ──
@@ -237,6 +249,37 @@ export async function runTurn({
     mentionsOf,
   });
 
+  // ── 6. Chapter lifecycle ──
+  // The engine decides when a chapter is finished (DESIGN §4). Closing here,
+  // inside the transaction, means the committed state already reflects the
+  // transition — no external `nextChapter()` call is required.
+  let chapterTransition = null;
+  const closure = maybeCloseChapter(committed.canon, committed.ledgers, {
+    editorSuggested: committed.editor?.suggest_close_chapter === true,
+  });
+
+  if (closure.closed) {
+    committed.canon = closure.canon;
+    const idf = makeIdFactory(committed.canon.turn);
+    addEvent(committed.ledgers, {
+      id: idf('ev'),
+      turn: committed.canon.turn,
+      kind: 'world',
+      actors: [],
+      location: committed.canon.location,
+      time: committed.canon.time,
+      summary: `《${closure.from.name}》收尾，进入《${closure.to.name}》`,
+      source: 'director',
+    });
+    chapterTransition = {
+      reason: closure.reason,
+      from: closure.from.name,
+      to: closure.to.name,
+      index: closure.nextChapterIndex,
+    };
+    committed.turnRecord.chapterEnded = closure.from.name;
+  }
+
   const nextState = {
     canon: committed.canon,
     minds: committed.minds,
@@ -265,6 +308,7 @@ export async function runTurn({
     secretReveals: committed.secretReveals,
     editor: committed.editor,
     summary: committed.turnRecord.summary,
+    chapterTransition,
   };
 
   return { state: nextState, turnResult };

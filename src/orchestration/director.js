@@ -6,14 +6,18 @@
  * it *dramatic* ones ("advance A's goal, pay off the letter planted in turn 7,
  * close on a reversal").
  *
- * Everything that can be computed deterministically — the tension curve, seed
- * due dates, the chapter turn budget — is computed here and never asked of the
- * LLM. Only semantics needing understanding (`mustComplicate`) will call a cheap
- * model, and that lands in P2. P0 ships a working deterministic planner so the
- * turn transaction has a real `BeatSpec` to carry.
+ * Split deliberately in two:
+ *
+ *  - `plan()` is **sync and deterministic**. The tension curve, seed due dates,
+ *    who must advance, and the chapter budget are all computed from state. No
+ *    model is consulted, so a beat is reproducible and snapshot-testable.
+ *  - `enrich()` is **async and optional**. Only the parts that need semantic
+ *    judgement — what obstacle to introduce, whether the hook should be a
+ *    reversal — are asked of a cheap model. Without a director model the
+ *    deterministic beat stands on its own.
  */
 
-import { seedsByUrgency } from '../state/ledger.js';
+import { seedsByUrgency, openSeeds } from '../state/ledger.js';
 import { currentChapter } from '../state/canon.js';
 
 /** Public headline for the turn's closing beat. */
@@ -24,22 +28,34 @@ const WEIGHT_PRIORITY = {
   '男主': 0, '女主': 0, '男二': 1, '女二': 1, '反派': 2, '男配': 3, '女配': 3, '隐藏角色': 4,
 };
 
+/** A seed at or above this urgency must be paid this turn. */
+export const PAY_URGENCY_THRESHOLD = 0.4;
+
+/** A seed at or above this urgency is overdue and escalates to a hard note. */
+export const ESCALATE_URGENCY = 0.75;
+
+/** Beyond this age an open seed is treated as overdue regardless of mentions. */
+export const OVERDUE_AGE = 10;
+
+/** Keep at most this many threads open before planting more. */
+export const SEED_BUDGET = 3;
+
 const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
 
 /**
  * @typedef {Object} BeatSpec
  * @property {string[]} mustAdvance     - Entity ids whose goals must move
  * @property {string[]} mustComplicate  - Obstacles that must be introduced
- * @property {string[]} plantOrPay      - Seed ids to plant or pay off
+ * @property {string[]} plantOrPay      - Seed ids that must be resolved now
+ * @property {number} plantCount        - How many new threads to plant (0 or 1)
+ * @property {string[]} overdue         - Seeds past the escalation threshold
  * @property {number} tensionTarget     - Intent value for this turn
  * @property {string} hookKind
  * @property {string[]} constraintNotes
+ * @property {boolean} [enriched]       - Whether a model contributed to this beat
  */
 
-/**
- * The tension the chapter is aiming for at its current progress,
- * before error correction.
- */
+/** The tension the chapter is aiming for at its current progress. */
 function curveTarget(chapter) {
   if (!chapter) return 40;
   const progress = chapter.targetTurns > 0
@@ -98,17 +114,49 @@ function pickMustAdvance(canon, turn, limit = 2) {
   return ordered.slice(0, limit).map(c => c.id);
 }
 
+/**
+ * Decide which threads must be resolved now, and whether to plant a new one.
+ *
+ * A seed becomes due as it ages, as it keeps being mentioned, and as the chapter
+ * closes — all computed in `state/ledger.js`. This function is the consumer that
+ * 0.1.0 never had: tension and seeds existed but nobody acted on them.
+ */
+function planSeeds(ledgers, canon) {
+  const open = openSeeds(ledgers);
+  const chapter = currentChapter(canon);
+
+  const ranked = seedsByUrgency(ledgers);
+  const due = ranked.filter(s => s.urgency >= PAY_URGENCY_THRESHOLD);
+  const overdue = due.filter(s =>
+    s.urgency >= ESCALATE_URGENCY || canon.turn - s.plantedTurn >= OVERDUE_AGE
+  );
+
+  const plantOrPay = due.map(s => s.id);
+
+  // Plant only when the ledger is not already crowded, and thin it out as the
+  // chapter closes so the ending is not buried under new promises.
+  const closing = chapter ? chapter.completedTurns / chapter.targetTurns : 0;
+  const budget = closing >= 0.8 ? 1 : SEED_BUDGET;
+  const plantCount = open.length < budget ? 1 : 0;
+
+  return { plantOrPay, overdue: overdue.map(s => s.id), plantCount };
+}
+
 export class Director {
   /**
    * @param {object} [options]
-   * @param {number} [options.maxSeedsPerTurn] - Seeds planted/paid per turn
+   * @param {number} [options.maxSeedsPerTurn] - Cap on threads paid per turn
+   * @param {{complete: Function}} [options.client] - Cheap model for `enrich()`
+   * @param {string} [options.model]
    */
-  constructor({ maxSeedsPerTurn = 2 } = {}) {
+  constructor({ maxSeedsPerTurn = 2, client = null, model = null } = {}) {
     this.maxSeedsPerTurn = maxSeedsPerTurn;
+    this.client = client;
+    this.model = model;
   }
 
   /**
-   * Plan one beat.
+   * Plan one beat. Deterministic: the same state always yields the same beat.
    *
    * @param {Object} input
    * @param {import('../contracts/types.js').Canon} input.canon
@@ -121,12 +169,18 @@ export class Director {
     const chapter = currentChapter(canon);
     const turn = canon.turn + 1; // the turn about to be written
 
-    const dueSeeds = seedsByUrgency(ledgers)
-      .filter(s => s.urgency > 0)
-      .slice(0, this.maxSeedsPerTurn)
-      .map(s => s.id);
+    const { plantOrPay, overdue, plantCount } = planSeeds(ledgers, canon);
 
     const constraintNotes = [];
+    for (const seedId of overdue) {
+      const seed = ledgers.seeds.find(s => s.id === seedId);
+      if (seed) {
+        constraintNotes.push(
+          `伏笔「${seed.text}」已积压 ${turn - seed.plantedTurn} 回合，本回合必须给出交代（回收或明确转折）`
+        );
+      }
+    }
+
     if (mode === 'character' && holderId) {
       const holder = canon.entities.find(e => e.id === holderId);
       if (holder) constraintNotes.push(`必须给 ${holder.name} 留出行动与反应的余地`);
@@ -135,11 +189,84 @@ export class Director {
     return {
       mustAdvance: pickMustAdvance(canon, turn),
       mustComplicate: [],
-      plantOrPay: dueSeeds,
+      plantOrPay: plantOrPay.slice(0, this.maxSeedsPerTurn),
+      plantCount,
+      overdue,
       tensionTarget: tensionTargetFor(canon, chapter),
       hookKind: HOOK_KINDS[turn % HOOK_KINDS.length],
       constraintNotes,
     };
+  }
+
+  /** True when a model is available to contribute semantic judgement. */
+  get canEnrich() {
+    return typeof this.client?.complete === 'function';
+  }
+
+  /**
+   * Ask a cheap model for the parts a rule cannot decide: what obstacle to
+   * introduce, and whether the hook kind should change.
+   *
+   * Never throws and never blocks a turn — any failure returns the
+   * deterministic beat unchanged.
+   *
+   * @param {BeatSpec} beatSpec
+   * @param {{canon: object, ledgers: object, mode?: string, holderId?: string}} context
+   * @returns {Promise<BeatSpec>}
+   */
+  async enrich(beatSpec, { canon, ledgers = { events: [], seeds: [] } }) {
+    if (!this.canEnrich) return beatSpec;
+
+    const chapter = currentChapter(canon);
+    const cast = canon.entities
+      .filter(e => e.kind === 'character')
+      .map(e => `${e.name}（目标：${e.goal || '未定'}）`)
+      .join('；');
+    const threads = openSeeds(ledgers).map(s => s.text).join('；') || '（无）';
+
+    const prompt = `你是一部${canon.meta.tag || ''}小说的戏剧顾问。为下一回合设计一个障碍和一个收尾钩子。
+
+当前章节：${chapter?.name ?? ''}（目标：${chapter?.goal ?? ''}）
+角色：${cast}
+当前张力：${canon.tension}/100，本回合目标张力：${beatSpec.tensionTarget}
+未回收伏笔：${threads}
+本回合必须推进：${beatSpec.mustAdvance.length ? '见角色设定' : '无特定要求'}
+
+只返回合法JSON，不含其他文字：
+{"complicate":"本回合必须制造的一个具体阻碍（20字内，须与上述人物或伏笔直接相关）","hookKind":"${HOOK_KINDS.join('|')}"}`;
+
+    try {
+      const text = await this.client.complete(prompt, { maxTokens: 200, model: this.model ?? undefined });
+      const json = parseLooseJSON(text);
+      if (!json) return beatSpec;
+
+      const complicate = typeof json.complicate === 'string' && json.complicate.trim()
+        ? [json.complicate.trim()]
+        : [];
+
+      return {
+        ...beatSpec,
+        mustComplicate: complicate,
+        hookKind: HOOK_KINDS.includes(json.hookKind) ? json.hookKind : beatSpec.hookKind,
+        enriched: true,
+      };
+    } catch {
+      // A director advisory is never load-bearing.
+      return beatSpec;
+    }
+  }
+}
+
+/** Tolerant JSON extraction — the advisor may wrap output in prose. */
+function parseLooseJSON(text) {
+  if (typeof text !== 'string') return null;
+  const s = text.indexOf('{');
+  const e = text.lastIndexOf('}');
+  if (s < 0 || e < 0) return null;
+  try {
+    return JSON.parse(text.slice(s, e + 1));
+  } catch {
+    return null;
   }
 }
 

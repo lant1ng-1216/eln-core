@@ -43,6 +43,10 @@ export {
 } from './src/state/ledger.js';
 export { VersionStore } from './src/state/version.js';
 export { applyDelta } from './src/state/commit.js';
+export {
+  maybeCloseChapter, closeChapter, evaluateCloseCriteria,
+  chapterBudgetExhausted, chapterProgress,
+} from './src/state/chapter.js';
 
 // Mind — perspective projection
 export { projectCanon, hiddenSecrets, canSee } from './src/mind/project.js';
@@ -57,7 +61,10 @@ export { compose, normalizePacks, buildWorldGenPrompt, buildExtractionPrompt } f
 export { assembleContext } from './src/expression/render.js';
 
 // Orchestration
-export { Director, createDirector, tensionTargetFor, HOOK_KINDS } from './src/orchestration/director.js';
+export {
+  Director, createDirector, tensionTargetFor, HOOK_KINDS,
+  PAY_URGENCY_THRESHOLD, ESCALATE_URGENCY, SEED_BUDGET, OVERDUE_AGE,
+} from './src/orchestration/director.js';
 export { runTurn, TurnFailedError } from './src/orchestration/turn.js';
 export { extractWithRepair, buildRepairPrompt } from './src/orchestration/repair.js';
 

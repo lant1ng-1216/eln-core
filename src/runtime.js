@@ -57,6 +57,7 @@ export class ELNRuntime {
    * @param {Function} [options.onLine]
    * @param {Function} [options.onTurnEnd]
    * @param {Function} [options.onEvent]
+   * @param {Function} [options.onChapterEnd] - Fired when a chapter closes itself
    */
   constructor(options = {}) {
     const {
@@ -71,7 +72,7 @@ export class ELNRuntime {
       retriever = null,
       maxRepair = 1,
       fetchImpl,
-      onToken, onLine, onTurnEnd, onEvent,
+      onToken, onLine, onTurnEnd, onEvent, onChapterEnd,
     } = options;
 
     const clientOpts = { apiKey, apiBase, fetchImpl };
@@ -80,6 +81,11 @@ export class ELNRuntime {
 
     this._narrativeClient = new LLMClient({ ...clientOpts, model: narrativeModel });
     this._extractionClient = new LLMClient({ ...clientOpts, model: extractionModel });
+    // The director's advisory call is optional and never load-bearing, so a
+    // model is only wired up when one is explicitly configured.
+    this._directorClient = models.director
+      ? new LLMClient({ ...clientOpts, model: models.director })
+      : null;
 
     this._packs = packs;
     this._mode = mode;
@@ -89,13 +95,17 @@ export class ELNRuntime {
     this._retriever = retriever ?? new KeywordRetriever({ store: this._prose });
     // A caller-supplied retriever may not know about our prose store yet.
     this._retriever.attach?.(this._prose);
-    this._director = new Director();
+    this._director = new Director({
+      client: this._directorClient,
+      model: models.director ?? null,
+    });
     this._maxRepair = maxRepair;
 
     this._onToken = onToken ?? null;
     this._onLine = onLine ?? null;
     this._onTurnEnd = onTurnEnd ?? null;
     this._onEvent = onEvent ?? null;
+    this._onChapterEnd = onChapterEnd ?? null;
 
     // State
     this._canon = null;
@@ -258,6 +268,7 @@ export class ELNRuntime {
       this._directives = {};
       this._chapterHint = '';
 
+      if (turnResult.chapterTransition) this._onChapterEnd?.(turnResult.chapterTransition);
       this._onTurnEnd?.(turnResult);
       return turnResult;
     } finally {

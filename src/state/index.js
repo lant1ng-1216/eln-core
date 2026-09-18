@@ -10,3 +10,4 @@ export * from './mind.js';
 export * from './ledger.js';
 export * from './version.js';
 export * from './commit.js';
+export * from './chapter.js';

@@ -30,6 +30,16 @@
 - **导演层与 BeatSpec** —— 由"文风指令"升级为"戏剧指令"（本回合必须推进谁的目标、处理哪条伏笔、
   以何种钩子收束）。`tension` 采用**差驱动**：`canon.tension` 为实际值，导演持 `target`，
   二者之差沿曲线收敛。
+- **章节自动收尾（P2）** —— `maybeCloseChapter()` 在每次提交后判定：`closeCriteria` 全部满足，
+  或回合预算耗尽，或抽取器在章节进度 ≥80% 时建议收尾。引擎自行推进章节并写入 `world` 事件，
+  手动 `nextChapter()` 降级为覆盖手段。
+- **伏笔回收压力（P2）** —— 导演按 urgency 决定本回合必须回收哪些线（`plantOrPay`）；
+  逾期未回收的线升级为 `constraintNotes` 中的硬性要求，并在 `overdue` 中列出。
+  伏笔账本拥挤时停止新增（`plantCount` 转为 0），临近章节收尾时进一步收紧。
+- **可选导演模型（P2）** —— 配置 `models.director` 后，`Director.enrich()` 会用便宜模型补上
+  规则无法决定的 `mustComplicate` 与 `hookKind`。**不配置则完全走确定性规划**；
+  `enrich` 任何失败都原样返回确定性 beat，不影响回合。
+- **`onChapterEnd` 回调** —— 章节自动收尾时触发，参数为 `{ reason, from, to, index }`。
 - **契约层（zod）** —— `contracts/schema.js` 定义全部持久化结构与抽取载荷；
   `validateExtraction()` 提供**分块校验 + 块级降级**：某块非法只废该块，不整回合回滚。
 - **表达层 packs** —— `GenrePack` / `StylePack` / `ConstraintPack` 全部数据驱动。
@@ -61,7 +71,7 @@
 | `getState()` → `{ worldState, characters, chapters, turns, snapshots }` | `getState()` → `{ canon, minds, events, seeds, turns }`；`getState({ perspective })` 返回视角视图 |
 | `character.secret` | `canon.facts` 查询（`secretsOf(canon, entityId)`） |
 | `tension` 由抽取器给出且无人消费 | 实际值 + 导演目标值，差驱动收敛 |
-| `nextChapter(hint)` 手动推进 | 保留为覆盖手段；P2 起章节可自动收尾 |
+| `nextChapter(hint)` 手动推进 | 章节按判据自动收尾；`nextChapter()` 保留为作者的覆盖手段 |
 | `saveSnapshot()` / `rewindTo(index)` | `branch({ from })` / `checkout(version)` |
 | `eln.save(userId)`（同步、仅浏览器） | `await eln.save(userId)`（异步、存储适配器） |
 | `ELNRuntime.getSavedWorlds(userId)` | 同上，可传入 storage；实例方法 `listSavedWorlds()` |
@@ -77,8 +87,13 @@
 - `DESIGN.md` §10.1 的 `predicate_raw` 与 §10.2 的块级降级已按决策实现；§10.3–§10.5 的决策
   （差驱动、action 经导演复核、character 模式禁用 intervention 并提供 `injectWorldEvent()`）
   中，§10.4/§10.5 在 P3 完整落地，P0 已预置接口与错误提示。
+- `DESIGN.md` §4 的 `BeatSpec` 增加了三个字段：`plantCount`（本回合是否需新埋一条线）、
+  `overdue`（已逾期的伏笔 id）、`enriched`（本回合的 beat 是否经过模型补充）。前两者让
+  "何时埋线 / 何时必须回收"成为数据而非隐含规则；后者便于观测成本路由是否生效。
+- `Director.plan()` 保持**同步确定性**，模型参与的部分拆到 `Director.enrich()`（异步、可选）。
+  §5.1 把 `director.plan` 画在回合事务的第二步，本实现把 `enrich` 放在同一位置，
+  但保证它永不阻塞、永不失败。
 
 ### 尚未实现（后续阶段）
 
-P2 伏笔与导演完整化 · P3 双模式渲染 · P4 连续性守卫与成本路由 · P5 角色智能体。
-详见 `DESIGN.md` §9。
+P3 双模式渲染 · P4 连续性守卫与成本路由 · P5 角色智能体。详见 `DESIGN.md` §9。

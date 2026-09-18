@@ -144,9 +144,10 @@ function renderInterventionBlock(intervention, directives) {
  * The director's dramatic instruction for this turn (DESIGN §4).
  * Unlike 0.1.0's style-only guidance, this says what the turn must *accomplish*.
  */
-function renderBeatBlock(beatSpec, canon) {
+function renderBeatBlock(beatSpec, canon, ledgers) {
   if (!beatSpec) return '';
   const nameOf = id => canon.entities.find(e => e.id === id)?.name ?? id;
+  const seedText = id => ledgers?.seeds?.find(s => s.id === id)?.text ?? id;
 
   const lines = [];
   if (beatSpec.mustAdvance?.length) {
@@ -156,7 +157,13 @@ function renderBeatBlock(beatSpec, canon) {
     lines.push(`- 必须制造阻碍：${beatSpec.mustComplicate.join('；')}`);
   }
   if (beatSpec.plantOrPay?.length) {
-    lines.push(`- 必须处理伏笔：${beatSpec.plantOrPay.join('、')}`);
+    // Rendered by text, not id: the model resolves a described thread far more
+    // reliably than `sd_t7_2`, even though the id is what the payload references.
+    const threads = beatSpec.plantOrPay.map(seedText);
+    lines.push(`- 必须回收伏笔：${threads.map(t => `「${t}」`).join('、')}`);
+  }
+  if (beatSpec.plantCount > 0) {
+    lines.push('- 本回合需埋下 1 条新的伏笔（自然融入叙事，不要点破）');
   }
   if (typeof beatSpec.tensionTarget === 'number') {
     lines.push(`- 张力目标：${beatSpec.tensionTarget}/100`);
@@ -232,7 +239,7 @@ export function assembleContext({
     knowledgeBlock: renderKnowledgeBlock(view),
     memoryBlock: renderMemoryBlock(turnRecords, retrieved),
     seedsBlock: renderSeedsBlock(view, ledgers),
-    beatBlock: renderBeatBlock(beatSpec, canon),
+    beatBlock: renderBeatBlock(beatSpec, canon, ledgers),
     interventionBlock: renderInterventionBlock(intervention, directives),
   };
 
