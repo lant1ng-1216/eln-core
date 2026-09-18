@@ -74,6 +74,9 @@ export {
   ContinuityGuard, createGuard, checkContinuity,
   extractSpeakers, leakedSecrets, describeViolations,
 } from './src/orchestration/guard.js';
+export {
+  CharacterAgents, createAgents, pickAgents, AGENT_EVENT_KIND,
+} from './src/orchestration/agents.js';
 
 // Memory — adapters, prose retention and retrieval
 export { MemoryStorage, LocalStorageStorage, createDefaultStorage } from './src/memory/adapters/index.js';

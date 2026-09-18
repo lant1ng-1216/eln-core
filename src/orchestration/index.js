@@ -9,3 +9,4 @@ export * from './director.js';
 export * from './turn.js';
 export * from './repair.js';
 export * from './guard.js';
+export * from './agents.js';

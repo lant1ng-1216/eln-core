@@ -28,6 +28,7 @@ Canon（客观真相） ──投影──▶ Mind（各主体私有视角）─
 | **视角可切换** | `director`（全知）与 `character`（有限视角）是同一次投影，只换 `holderId`。切模式不改状态，来回切换无损耗。角色模式不仅过滤情报，还按该角色的错误认知叙述。 |
 | **回合即事务** | 任一步失败则整回合回滚，计数器绝不漂移。 |
 | **连续性守卫** | 抽取之前先查正文：已死亡的角色开口、有限视角写出无从知晓的秘密——确定性检出并打回重写一次。 |
+| **角色智能体** | 角色会背着你行动：按各自目标在幕后制造事件（`source:'agent'`），导演再把这些幕后动作变成下一场戏的义务。 |
 | **成本可观测** | 每次调用的 token 用量按模型角色记账，区分"服务商上报"与"估算"。 |
 
 **UI 无关 · 题材/文风/存储/检索全部可插拔。**
@@ -118,7 +119,7 @@ await eln.generateWorld({ prompt: '三个AI科学家在火星基地，其中一�
 | `apiKey` | `string` | **必填** | LLM API 密钥 |
 | `apiBase` | `string` | `https://api.deepseek.com` | API 地址 |
 | `model` | `string` | `deepseek-chat` | 单模型简写 |
-| `models` | `{narrative, extraction, director, critic}` | — | 分角色模型（成本路由） |
+| `models` | `{narrative, extraction, director, critic, agent}` | — | 分角色模型（成本路由） |
 | `packs` | `Array` | `[]` | `genrePack(...)` / `stylePack(...)` / `constraintPack(...)` |
 | `mode` | `'director' \| 'character'` | `director` | 视角模式 |
 | `playerEntityId` | `string` | — | character 模式必填 |
@@ -129,9 +130,12 @@ await eln.generateWorld({ prompt: '三个AI科学家在火星基地，其中一�
 | `onChapterEnd` | `({reason, from, to, index}) => void` | — | 章节自动收尾时触发 |
 | `onRewrite` | `({attempt, violations}) => void` | — | 正文被打回重写时触发（见下） |
 | `maxRewrites` | `number` | `1` | 连续性重写次数上限；0 表示只检测不改写 |
+| `autoAgents` | `boolean` | `true` | 配置 `models.agent` 后是否自动运行幕后行动 |
+| `maxAgents` | `number` | `2` | 每回合最多几个角色在幕后行动 |
 
-> `models.director` 与 `models.critic` 都是可选的：配置后用便宜模型补上规则无法决定的部分
-> （制造什么阻碍 / 语义校对），失败也不影响回合。不配置则完全走确定性路径。
+> `models.director` / `models.critic` / `models.agent` 都是可选的：配置后用便宜模型补上规则
+> 无法决定的部分（制造什么阻碍 / 语义校对 / 幕后行动），**失败都不影响回合**。
+> 不配置则完全走确定性路径。
 
 ### 世界与回合
 
@@ -185,6 +189,43 @@ new ELNRuntime({
     console.log(`《${from}》收尾（${reason}），进入《${to}》`)
   },
 })
+```
+
+### 角色智能体（幕后行动）
+
+配置 `models.agent` 后，角色会在每回合结束**背着你行动**：
+
+```js
+const eln = new ELNRuntime({
+  apiKey,
+  models: { narrative: 'deepseek-chat', extraction: 'deepseek-chat', agent: 'deepseek-chat' },
+  maxAgents: 2,        // 每回合最多 2 人在幕后行动
+  autoAgents: true,    // 默认开启；关掉也能手动触发
+  onEvent: e => { if (e.source === 'agent') console.log('幕后:', e.summary) },
+})
+
+const result = await eln.runTurn()
+result.betweenTurns   // { events, actedIds, modelChecked }
+```
+
+下一回合，这些幕后动作会作为**义务**进入导演的 beat：
+
+```
+- 幕后：李明远悄悄见了巡捕房的线人。本回合必须让此事的影响渗入场景
+  （不必直写，但不能当作没发生过）
+```
+
+规则：
+- **谁行动是确定性的**：已死亡或无目标的角色不能行动；玩家被排除（玩家用 `action`）。
+  轮换相位与 `mustAdvance` 故意错开——台前主角和幕后操盘手不该总是同一个人。
+- **做什么才用模型**：一次调用为选中角色各产出一个行动，要求服务于其自身目标、
+  不得凭空引入新地点/角色、不得直接回收伏笔。
+- **失败不影响你的回合**：模型挂了或输出畸形，只是这一回合没有幕后动作。
+
+也可以手动驱动：
+
+```js
+await eln.betweenTurns()   // 立即运行并提交一个版本
 ```
 
 ### 连续性守卫与重写

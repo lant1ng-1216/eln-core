@@ -53,6 +53,7 @@ const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
  * @property {string} hookKind
  * @property {string[]} constraintNotes
  * @property {string} [playerAction]    - The reviewed action folded into this beat
+ * @property {string[]} [adoptedAgentEvents] - Off-screen events this beat must honour
  * @property {boolean} [enriched]       - Whether a model contributed to this beat
  */
 
@@ -191,6 +192,20 @@ export class Director {
       }
     }
 
+    // ── Adopt off-screen character action (DESIGN §9 P5) ──
+    // An agent event is only worth writing if a scene picks it up; otherwise the
+    // ledger accumulates moves nobody ever sees. Recent ones become obligations.
+    const adoptedAgentEvents = [];
+    for (const event of (ledgers.events ?? []).filter(
+      e => e.source === 'agent' && turn - e.turn <= 1
+    ).slice(-2)) {
+      const actor = canon.entities.find(e => e.id === event.actors?.[0]);
+      adoptedAgentEvents.push(event.id);
+      constraintNotes.push(
+        `幕后：${actor?.name ?? '某人'}${event.summary}。本回合必须让此事的影响渗入场景（不必直写，但不能当作没发生过）`
+      );
+    }
+
     let mustAdvance = pickMustAdvance(canon, turn, this.maxAdvance);
 
     if (mode === 'character' && holderId) {
@@ -222,6 +237,7 @@ export class Director {
       hookKind: HOOK_KINDS[turn % HOOK_KINDS.length],
       constraintNotes,
       playerAction: action || '',
+      adoptedAgentEvents,
     };
   }
 

@@ -24,6 +24,8 @@ import { diffUsage, sumUsage } from './transport/usage.js';
 import { runTurn as runTurnTransaction } from './orchestration/turn.js';
 import { Director } from './orchestration/director.js';
 import { ContinuityGuard } from './orchestration/guard.js';
+import { CharacterAgents } from './orchestration/agents.js';
+import { addEvent } from './state/ledger.js';
 import { canonFromGeneratedWorld, resolveRef, secretsOf, entityByName, cloneCanon } from './state/canon.js';
 import { createMinds, mindFor, adjustTrust, cloneMinds, setTrust } from './state/mind.js';
 import { createLedgers, addSeed } from './state/ledger.js';
@@ -92,6 +94,9 @@ export class ELNRuntime {
     this._criticClient = models.critic
       ? new LLMClient({ ...clientOpts, model: models.critic })
       : null;
+    this._agentClient = models.agent
+      ? new LLMClient({ ...clientOpts, model: models.agent })
+      : null;
 
     this._packs = packs;
     this._mode = mode;
@@ -109,6 +114,13 @@ export class ELNRuntime {
       client: this._criticClient,
       model: models.critic ?? null,
     });
+    this._agents = new CharacterAgents({
+      client: this._agentClient,
+      model: models.agent ?? null,
+      maxAgents: options.maxAgents ?? 2,
+    });
+    /** Whether characters act between turns when an agent model is configured. */
+    this._autoAgents = options.autoAgents ?? true;
     this._maxRepair = maxRepair;
     this._maxRewrites = maxRewrites;
 
@@ -351,7 +363,15 @@ export class ELNRuntime {
       this._directives = {};
       this._chapterHint = '';
 
-      // Attach the observable cost of this turn (DESIGN §9 P4).
+      // ── Between turns: characters act on their own (DESIGN §9 P5) ──
+      // Runs after the scene is committed. A failure here must never cost the
+      // player their turn, so it is swallowed and reported on the result.
+      if (this._autoAgents && this._agents.canAct) {
+        turnResult.betweenTurns = await this._runAgents({ silent: true });
+      }
+
+      // Attach the observable cost of this turn (DESIGN §9 P4), including any
+      // off-screen model call made above.
       turnResult.usage = diffUsage(usageBefore, this._usageSnapshot());
 
       if (turnResult.chapterTransition) this._onChapterEnd?.(turnResult.chapterTransition);
@@ -639,6 +659,46 @@ export class ELNRuntime {
   get isRunning() { return this._isRunning; }
   get isWorldLoaded() { return this._canon !== null; }
 
+  // ── Character agents (between turns) ───────────────────────────────────────
+
+  /**
+   * Let characters act off-screen, outside the scene loop (DESIGN §9 P5).
+   *
+   * Runs automatically after a turn when `models.agent` is configured and
+   * `autoAgents` is on; call it directly to drive the hook yourself.
+   *
+   * @param {{silent?: boolean}} [options] - `silent` skips the version commit
+   *   (used by the automatic path, where the next turn will commit the events)
+   * @returns {Promise<{events: Array, actedIds: string[], modelChecked: boolean, error?: string}>}
+   */
+  async betweenTurns({ silent = false } = {}) {
+    if (!this._canon) throw new Error('[ELN] No world loaded.');
+    return this._runAgents({ silent });
+  }
+
+  async _runAgents({ silent = false } = {}) {
+    const result = await this._agents.act({
+      canon: this._canon,
+      minds: this._minds,
+      ledgers: this._ledgers,
+      playerEntityId: this._playerEntityId,
+    });
+
+    if (result.events.length) {
+      for (const event of result.events) {
+        addEvent(this._ledgers, event);
+        this._onEvent?.(event);
+      }
+      // Off-screen moves are part of the world, so they get their own version
+      // unless an imminent turn is about to commit them anyway.
+      if (!silent) {
+        this._canon.version = this._versions.commit(this._snapshotState());
+      }
+    }
+
+    return result;
+  }
+
   /** Cumulative token usage across every model role. */
   _usageSnapshot() {
     return sumUsage(
@@ -646,6 +706,7 @@ export class ELNRuntime {
       this._extractionClient.usage.snapshot(),
       this._directorClient?.usage.snapshot(),
       this._criticClient?.usage.snapshot(),
+      this._agentClient?.usage.snapshot(),
     );
   }
 
@@ -661,12 +722,17 @@ export class ELNRuntime {
     if (this._directorClient) byRole.director = this._directorClient.usage.snapshot();
     if (this._criticClient) byRole.critic = this._criticClient.usage.snapshot();
 
+    if (this._agentClient) byRole.agent = this._agentClient.usage.snapshot();
+
     return { ...this._usageSnapshot(), byRole };
   }
 
   /** Forget accumulated usage counters. */
   resetUsage() {
-    for (const client of [this._narrativeClient, this._extractionClient, this._directorClient, this._criticClient]) {
+    for (const client of [
+      this._narrativeClient, this._extractionClient,
+      this._directorClient, this._criticClient, this._agentClient,
+    ]) {
       client?.resetUsage();
     }
     return this;
