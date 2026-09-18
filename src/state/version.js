@@ -28,15 +28,27 @@ function nextLineId() {
 
 /**
  * Accept either a full state bundle or a bare Canon and normalize it.
+ *
+ * `prose` is stored as a plain JSON payload. It arrives as a `ProseStore`
+ * instance, and `structuredClone` would strip its prototype; duck-typing on
+ * `toJSON`/`fromJSON` keeps this layer free of any dependency on `memory/`
+ * (DESIGN §1 layer rules) while still snapshotting the prose.
+ *
  * @param {object} state
  */
 function normalizeState(state) {
+  const cloneProse = prose => {
+    if (!prose) return null;
+    return typeof prose.toJSON === 'function' ? structuredClone(prose.toJSON()) : structuredClone(prose);
+  };
+
   if (state && typeof state === 'object' && 'canon' in state) {
     return {
       canon: structuredClone(state.canon),
       minds: state.minds ? structuredClone(state.minds) : new Map(),
       ledgers: structuredClone(state.ledgers ?? { events: [], seeds: [] }),
       turnRecords: structuredClone(state.turnRecords ?? []),
+      prose: cloneProse(state.prose),
     };
   }
   return {
@@ -44,6 +56,7 @@ function normalizeState(state) {
     minds: new Map(),
     ledgers: { events: [], seeds: [] },
     turnRecords: [],
+    prose: null,
   };
 }
 

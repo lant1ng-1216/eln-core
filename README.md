@@ -22,7 +22,7 @@ Canon（客观真相） ──投影──▶ Mind（各主体私有视角）─
 | 能力 | 说明 |
 |---|---|
 | **信息差** | 状态分两层：`Canon` 是客观真相，`Mind` 是每个角色各自知道/怀疑/误信的东西。`Mind` 不是 `Canon` 的子集，而是**可以出错的映射**——误会、谎言、戏剧反讽由此自然涌现。 |
-| **长期记忆** | 事件账本记录"真正发生了什么"及其因果链；伏笔账本追踪埋下的线是否回收。 |
+| **长期记忆** | 正文逐回合留存并可检索，事件账本记录"真正发生了什么"及其因果链，伏笔账本追踪埋下的线是否回收。第 6 回合仍能引用第 2 回合的细节。 |
 | **导演层** | 每回合先规划 `BeatSpec`：必须推进谁的目标、必须处理哪条伏笔、张力目标、收尾钩子。给的是**戏剧指令**，不是文风指令。 |
 | **视角可切换** | `director`（看全量真相）与 `character`（只看该角色所知）是同一次投影，只换 `holderId`。 |
 | **回合即事务** | 任一步失败则整回合回滚，计数器绝不漂移。 |
@@ -120,7 +120,7 @@ await eln.generateWorld({ prompt: '三个AI科学家在火星基地，其中一�
 | `mode` | `'director' \| 'character'` | `director` | 视角模式 |
 | `playerEntityId` | `string` | — | character 模式必填 |
 | `storage` | `StorageAdapter` | 浏览器 localStorage / Node 内存 | 持久化适配器 |
-| `retriever` | `Retriever` | — | 检索适配器（P1） |
+| `retriever` | `Retriever` | `KeywordRetriever` | 检索适配器（可换向量检索） |
 | `onToken` / `onLine` | `(token) => void` | — | 流式回调 |
 | `onTurnEnd` / `onEvent` | `(result) => void` | — | 回合 / 事件回调 |
 
@@ -139,9 +139,30 @@ eln.getState({ perspective: holderId })      // 该角色的视角视图
 ```js
 eln.setCharDirective('李明远', '本回合必须怀疑谢云舒')
 eln.forceSecretReveal('李明远', '谢云舒')
+eln.plantSeed('那封没寄出的信')               // 主动埋一条伏笔
 eln.nextChapter('聚焦两人之间的信任危机')     // 返回 false 表示故事已完结
 eln.injectWorldEvent('城外传来爆炸声')        // 只改世界，不让任何角色凭空知情
 ```
+
+### 记忆与检索
+
+```js
+eln.prose.get(3)            // 第 3 回合的正文原文
+eln.prose.all()             // 全部留存正文（按回合升序）
+eln.searchProse('失踪名单', { limit: 3 })   // 主动检索历史正文
+```
+
+每回合装配上下文时，引擎会按导演的 `mustAdvance` 与临期伏笔自动检索历史正文，
+把相关旧事作为 `【相关旧事】` 块注入——因此很久以前埋下的细节不会因为摘要太短而消失。
+
+### 溯源
+
+```js
+const fact = eln.getState().canon.facts.find(f => f.tags.includes('secret'))
+fact.evidence   // { turn: 3, quote: '名单的事，你究竟知道多少？' }
+```
+
+每条抽取出的事实都记录它产生于第几回合、以及支撑它的原文短句。
 
 > `intervention` 仅限导演模式。在 character 模式下请用 `action`（玩家行动）或
 > `injectWorldEvent()`——后者只写事件账本，不进入任何 `Mind`，因此不会破坏认知边界。
@@ -199,6 +220,23 @@ class FileStorage {              // 实现 StorageAdapter 即可
 }
 
 new ELNRuntime({ apiKey, storage: new FileStorage() })
+```
+
+## 自定义检索
+
+默认检索是零依赖的关键词 + 实体名重叠。换成向量检索只需实现 `search`：
+
+```js
+class VectorRetriever {
+  attach(store) { this.store = store; return this }
+  index(records) { /* 建索引 */ }
+  search(query, { limit = 3, entityIds = [], excludeTurns = [] }) {
+    // → [{ record: { turn, text, entityIds }, score: number }]
+  }
+  retrieve(query, options) { /* 可直接复用 KeywordRetriever 的形状 */ }
+}
+
+new ELNRuntime({ apiKey, retriever: new VectorRetriever() })
 ```
 
 ---

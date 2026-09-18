@@ -61,9 +61,12 @@ export { Director, createDirector, tensionTargetFor, HOOK_KINDS } from './src/or
 export { runTurn, TurnFailedError } from './src/orchestration/turn.js';
 export { extractWithRepair, buildRepairPrompt } from './src/orchestration/repair.js';
 
-// Memory — adapters and persistence
+// Memory — adapters, prose retention and retrieval
 export { MemoryStorage, LocalStorageStorage, createDefaultStorage } from './src/memory/adapters/index.js';
 export {
   saveWorld, loadWorld, loadWorlds, deleteWorld,
   serializeState, deserializeState,
 } from './src/memory/store.js';
+export { ProseStore } from './src/memory/prose.js';
+export { tokenize, tokenSet, scoreRecord } from './src/memory/keywords.js';
+export { KeywordRetriever, createRetriever, buildQuery } from './src/memory/retriever.js';

@@ -24,7 +24,10 @@ import { cloneMinds } from '../state/mind.js';
 import { cloneLedgers, openSeeds } from '../state/ledger.js';
 import { extractWithRepair } from './repair.js';
 import { planBeat } from './director.js';
-import { makeIdFactory } from '../state/canon.js';
+import { makeIdFactory, currentChapter } from '../state/canon.js';
+
+/** A chapter is "closing" once it has used 80% of its turn budget. */
+const CHAPTER_END_RATIO = 0.8;
 
 /** Raised when a turn fails before commit. The state is untouched. */
 export class TurnFailedError extends Error {
@@ -126,6 +129,7 @@ export async function runTurn({
   maxRepair = 1,
   signal,
   extraNotes = [],
+  mentionsOf = null,
 } = {}) {
   if (!state?.canon) throw new Error('[ELN] No world loaded. Call loadWorld() first.');
 
@@ -146,8 +150,10 @@ export async function runTurn({
   }
 
   // ── 2. Assemble the projected context ──
+  // The beat decides what is worth re-reading: the actors whose goals must move
+  // and the threads coming due.
   const retrieved = typeof buildRetrieved === 'function'
-    ? buildRetrieved({ canon, turn: canon.turn + 1, mode, holderId })
+    ? buildRetrieved({ canon, turn: canon.turn + 1, mode, holderId, beatSpec })
     : [];
 
   const blocks = assembleContext({
@@ -215,6 +221,11 @@ export async function runTurn({
     delta.events = [...(delta.events ?? []), ...injected];
   }
 
+  const chapter = currentChapter(canon);
+  const nearChapterEnd = chapter
+    ? chapter.completedTurns / chapter.targetTurns >= CHAPTER_END_RATIO
+    : false;
+
   const committed = applyDelta({
     canon: cloneCanon(canon),
     minds: cloneMinds(state.minds),
@@ -222,6 +233,8 @@ export async function runTurn({
     delta,
     narrative: narrativeText,
     degraded: extraction.degraded,
+    nearChapterEnd,
+    mentionsOf,
   });
 
   const nextState = {

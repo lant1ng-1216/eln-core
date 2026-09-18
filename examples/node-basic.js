@@ -46,8 +46,9 @@ console.log(`世界：${world.name}（${world.tag}）`);
 console.log(`角色：${world.characters.map(c => c.name).join('、')}`);
 console.log(`章节：${world.chapters.map(c => c.name).join(' → ')}`);
 
-// 2. Load it.
+// 2. Load it, and plant a thread the director should keep in view.
 eln.loadWorld(world);
+eln.plantSeed('那封没有署名的信究竟是谁送的');
 
 // 3. Run a few turns.
 for (let i = 0; i < 2; i++) {
@@ -75,6 +76,15 @@ console.log('仍不知晓的秘密数:', view.hiddenFacts.filter(f => f.tags.inc
 console.log('\n── 未回收的伏笔 ──');
 for (const seed of eln.getOpenSeeds()) {
   console.log(`[${seed.urgency.toFixed(2)}] ${seed.text}`);
+}
+
+// 7. The prose is still here. Nothing is thrown away after extraction.
+console.log('\n── 历史正文可回读 ──');
+console.log('留存回合:', eln.prose.all().map(r => r.turn).join(', '));
+const recalled = eln.searchProse('信 李明远', { limit: 1 });
+if (recalled.length) {
+  console.log(`最相关的一回合（第 ${recalled[0].turn} 回合，得分 ${recalled[0].score}）:`);
+  console.log(recalled[0].text.slice(0, 60) + '…');
 }
 
 // 7. Branch the world line, then come back.

@@ -18,6 +18,15 @@
 - **事件账本** —— `Event { kind, actors, causes, effects, source }`，`source` 已为 P5 角色智能体预留
   `'agent'` 通道。
 - **伏笔账本** —— `Seed`，`urgency` 由确定性规则计算（`computeUrgency`），从不询问 LLM。
+- **正文留存与检索（P1）** —— `ProseStore` 保留每一回合的正文；`KeywordRetriever` 用
+  CJK bigram + 实体名重叠打分。检索是适配器，可替换为向量检索。每回合按导演的
+  `mustAdvance` 与临期伏笔构造查询，回捞历史正文——这是"第 6 回合仍能引用第 2 回合细节"的实现基础。
+- **抽取溯源（P1）** —— `Fact.evidence = { turn, quote }`，保留支撑该事实的原文短句；
+  `Mind` 的 `FactRef.evidence` 记录立场成立于哪些回合。
+- **伏笔提及度接入 urgency（P1）** —— 一个反复被正文提及的伏笔，其 `urgency` 高于同期被遗忘的伏笔
+  （确定性计算：年龄 + 提及次数 + 是否临近章节收尾）。
+- **`plantSeed(text, options)`** —— 作者/导演主动埋线的入口，与 `setCharDirective` 同属干预手段。
+- **版本快照包含正文** —— `checkout` 会一并还原该世界线的正文，不会出现"救回了世界却丢了原稿"。
 - **导演层与 BeatSpec** —— 由"文风指令"升级为"戏剧指令"（本回合必须推进谁的目标、处理哪条伏笔、
   以何种钩子收束）。`tension` 采用**差驱动**：`canon.tension` 为实际值，导演持 `target`，
   二者之差沿曲线收敛。
@@ -41,6 +50,8 @@
   现在计数器在事务内推进，`applyDelta` 全程操作克隆，失败则状态原封不动。
 - **`trigger` 死代码** —— 0.1.0 硬编码 `'ai'` 而渲染条件为 `!== 'ai'`，触发器系统永不生效。已移除。
 - **`[DONE]` 未终止读取** —— 0.1.0 的 `break` 只跳出内层循环。
+- **正文即丢即弃** —— 0.1.0 抽完 JSON 就丢弃正文，只留最近 3 条摘要；第 3 回合的伏笔到第 20 回合
+  在物理上已不存在。现在正文入 `ProseStore` 并可检索。
 
 ### 变更（破坏性）
 
@@ -54,6 +65,7 @@
 | `saveSnapshot()` / `rewindTo(index)` | `branch({ from })` / `checkout(version)` |
 | `eln.save(userId)`（同步、仅浏览器） | `await eln.save(userId)`（异步、存储适配器） |
 | `ELNRuntime.getSavedWorlds(userId)` | 同上，可传入 storage；实例方法 `listSavedWorlds()` |
+| 正文被丢弃 | `eln.prose` / `eln.searchProse()` 可读回任意历史回合 |
 | 零依赖 | 依赖 `zod`（契约校验与类型生成） |
 
 ### 设计偏离说明
@@ -68,5 +80,5 @@
 
 ### 尚未实现（后续阶段）
 
-P1 记忆与检索 · P2 伏笔与导演完整化 · P3 双模式渲染 · P4 连续性守卫与成本路由 · P5 角色智能体。
+P2 伏笔与导演完整化 · P3 双模式渲染 · P4 连续性守卫与成本路由 · P5 角色智能体。
 详见 `DESIGN.md` §9。

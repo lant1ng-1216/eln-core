@@ -24,7 +24,7 @@ import { runTurn as runTurnTransaction } from './orchestration/turn.js';
 import { Director } from './orchestration/director.js';
 import { canonFromGeneratedWorld, resolveRef, secretsOf, entityByName } from './state/canon.js';
 import { createMinds, mindFor, adjustTrust } from './state/mind.js';
-import { createLedgers } from './state/ledger.js';
+import { createLedgers, addSeed } from './state/ledger.js';
 import { applyDelta } from './state/commit.js';
 import { VersionStore } from './state/version.js';
 import { projectCanon } from './mind/project.js';
@@ -32,6 +32,9 @@ import { openSeeds } from './state/ledger.js';
 import { validateGeneratedWorld } from './contracts/validate.js';
 import { createDefaultStorage } from './memory/adapters/index.js';
 import { saveWorld, loadWorld, loadWorlds, deleteWorld } from './memory/store.js';
+import { ProseStore } from './memory/prose.js';
+import { KeywordRetriever, buildQuery } from './memory/retriever.js';
+import { tokenSet } from './memory/keywords.js';
 import { buildWorldGenPrompt } from './expression/compose.js';
 
 const DEFAULT_API_BASE = 'https://api.deepseek.com';
@@ -82,7 +85,10 @@ export class ELNRuntime {
     this._mode = mode;
     this._playerEntityId = playerEntityId;
     this._storage = storage ?? createDefaultStorage();
-    this._retriever = retriever;
+    this._prose = new ProseStore();
+    this._retriever = retriever ?? new KeywordRetriever({ store: this._prose });
+    // A caller-supplied retriever may not know about our prose store yet.
+    this._retriever.attach?.(this._prose);
     this._director = new Director();
     this._maxRepair = maxRepair;
 
@@ -149,6 +155,8 @@ export class ELNRuntime {
     this._minds = createMinds(canon);
     this._ledgers = createLedgers();
     this._turnRecords = [];
+    this._prose = new ProseStore();
+    this._retriever.attach?.(this._prose);
     this._versions = new VersionStore(this._snapshotState());
     this._directives = {};
     this._chapterHint = '';
@@ -161,6 +169,8 @@ export class ELNRuntime {
     this._minds = state.minds;
     this._ledgers = state.ledgers ?? createLedgers();
     this._turnRecords = state.turnRecords ?? [];
+    this._prose = state.prose ?? new ProseStore();
+    this._retriever.attach?.(this._prose);
     this._versions = new VersionStore(this._snapshotState());
     return this.getState();
   }
@@ -211,19 +221,40 @@ export class ELNRuntime {
         onToken: this._onToken,
         onLine: this._onLine,
         onEvent: this._onEvent,
+        buildRetrieved: ({ canon, beatSpec }) => this._buildRetrieved({
+          canon,
+          beatSpec,
+          entityIds: beatSpec?.mustAdvance ?? [],
+        }),
+        mentionsOf: seed => this._mentionCount(seed),
         budget: null,
         maxRepair: this._maxRepair,
         signal,
         extraNotes: this._chapterHint ? [`本章聚焦：${this._chapterHint}`] : [],
       });
 
+      // Retain the prose *before* committing, so this version's snapshot
+      // includes the turn it just wrote. Otherwise checking out this version
+      // would restore the canon but not the manuscript that produced it.
+      this._prose.append(state.canon.turn, turnResult.narrativeText, {
+        entityIds: this._entitiesIn(turnResult.narrativeText),
+        chapter: state.canon.chapterIndex,
+      });
+
       // Commit a version only after the whole transaction succeeded.
-      state.canon.version = this._versions.commit(state);
+      state.canon.version = this._versions.commit({
+        canon: state.canon,
+        minds: state.minds,
+        ledgers: state.ledgers,
+        turnRecords: state.turnRecords,
+        prose: this._prose,
+      });
 
       this._canon = state.canon;
       this._minds = state.minds;
       this._ledgers = state.ledgers;
       this._turnRecords = state.turnRecords;
+
       this._directives = {};
       this._chapterHint = '';
 
@@ -347,6 +378,8 @@ export class ELNRuntime {
     this._minds = restored.minds;
     this._ledgers = restored.ledgers;
     this._turnRecords = restored.turnRecords;
+    this._prose = restored.prose ? ProseStore.fromJSON(restored.prose) : new ProseStore();
+    this._retriever.attach?.(this._prose);
     return this._canon;
   }
 
@@ -395,7 +428,57 @@ export class ELNRuntime {
       minds: this._minds,
       ledgers: this._ledgers,
       turnRecords: this._turnRecords,
+      prose: this._prose,
     };
+  }
+
+  /**
+   * How often a seed's wording has resurfaced in the prose. Feeds the
+   * deterministic urgency formula — a thread that keeps being mentioned is
+   * closer to payoff than one that was planted and forgotten.
+   *
+   * @param {{text: string}} seed
+   * @returns {number}
+   */
+  _mentionCount(seed) {
+    const tokens = tokenSet(seed.text);
+    if (!tokens.size) return 0;
+    let hits = 0;
+    for (const record of this._prose.all()) {
+      const recordTokens = tokenSet(record.text);
+      for (const token of tokens) {
+        if (recordTokens.has(token)) { hits += 1; break; }
+      }
+    }
+    return hits;
+  }
+
+  /**
+   * Retrieve prose relevant to the beat about to be written. This is what lets
+   * turn 20 quote a detail planted in turn 3 — the engine goes back and re-reads
+   * its own manuscript instead of trusting a three-line summary.
+   */
+  _buildRetrieved({ canon, beatSpec, entityIds = [] }) {
+    if (!this._retriever) return [];
+    const seeds = openSeeds(this._ledgers ?? createLedgers());
+    const query = buildQuery({ canon, openSeeds: seeds, entityIds });
+    if (!query.trim()) return [];
+
+    // Never retrieve the turns already in the prompt as recent summaries.
+    const excludeTurns = this._turnRecords.slice(-3).map(t => t.turn);
+    return this._retriever.retrieve(query, {
+      limit: 3,
+      entityIds,
+      excludeTurns,
+    });
+  }
+
+  /** Names appearing in `text`, resolved to entity ids. */
+  _entitiesIn(text) {
+    if (!text || !this._canon) return [];
+    return this._canon.entities
+      .filter(e => e.name && text.includes(e.name))
+      .map(e => e.id);
   }
 
   // ── Read models ────────────────────────────────────────────────────────────
@@ -415,6 +498,27 @@ export class ELNRuntime {
       seeds: this._ledgers?.seeds ?? [],
       turns: this._turnRecords,
     };
+  }
+
+  /**
+   * Plant a foreshadowing thread deliberately. The extraction model plants
+   * threads on its own; this is the authoring control for when the director
+   * wants a specific promise made.
+   *
+   * @param {string} text
+   * @param {{kind?: string, holderIds?: string[]}} [options]
+   */
+  plantSeed(text, { kind = 'question', holderIds = [] } = {}) {
+    if (!this._canon) throw new Error('[ELN] No world loaded.');
+    return addSeed(this._ledgers, {
+      id: `sd_authored_${this._ledgers.seeds.length + 1}`,
+      plantedTurn: this._canon.turn,
+      text,
+      kind,
+      holderIds: holderIds.map(h => resolveRef(this._canon, h)),
+      status: 'open',
+      urgency: 0,
+    });
   }
 
   /** Open/paid/abandoned seeds, filtered. */
@@ -437,4 +541,15 @@ export class ELNRuntime {
 
   get isRunning() { return this._isRunning; }
   get isWorldLoaded() { return this._canon !== null; }
+
+  /** The retained prose. Read a past turn with `eln.prose.get(turn)`. */
+  get prose() { return this._prose; }
+
+  /** The active retrieval adapter (default: keyword + entity overlap). */
+  get retriever() { return this._retriever; }
+
+  /** Search retained prose directly. */
+  searchProse(query, options) {
+    return this._retriever?.retrieve(query, options) ?? [];
+  }
 }

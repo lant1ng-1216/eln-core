@@ -9,28 +9,33 @@
 
 import { validateCanon } from '../contracts/validate.js';
 import { MemoryStorage } from './adapters/memory-storage.js';
+import { ProseStore } from './prose.js';
 
 const keyFor = userId => `worlds:${userId}`;
 
 // ── Serialization ────────────────────────────────────────────────────────────
 
 /** @returns {object} a JSON-safe view of the runtime state */
-export function serializeState({ canon, minds, ledgers, turnRecords = [] }) {
+export function serializeState({ canon, minds, ledgers, turnRecords = [], prose = null }) {
   return {
     canon: structuredClone(canon),
     minds: [...minds].map(([id, mind]) => [id, structuredClone(mind)]),
     ledgers: structuredClone(ledgers ?? { events: [], seeds: [] }),
     turnRecords: structuredClone(turnRecords),
+    // Prose is the bulkiest part of a save and also the most valuable: without
+    // it a reloaded world forgets everything it ever wrote.
+    prose: prose ? prose.toJSON() : null,
   };
 }
 
-/** @returns {{canon, minds: Map, ledgers, turnRecords}} */
+/** @returns {{canon, minds: Map, ledgers, turnRecords, prose}} */
 export function deserializeState(payload) {
   return {
     canon: validateCanon(payload.canon),
     minds: new Map((payload.minds ?? []).map(([id, mind]) => [id, mind])),
     ledgers: payload.ledgers ?? { events: [], seeds: [] },
     turnRecords: payload.turnRecords ?? [],
+    prose: payload.prose ? ProseStore.fromJSON(payload.prose) : new ProseStore(),
   };
 }
 
@@ -48,6 +53,7 @@ export function worldSummary(state) {
     chapterCount: canon.chapters.length,
     charCount: canon.entities.filter(e => e.kind === 'character').length,
     openSeeds: (state.ledgers?.seeds ?? []).filter(s => s.status === 'open').length,
+    proseRecords: state.prose?.size ?? 0,
     updatedAt: Date.now(),
   };
 }

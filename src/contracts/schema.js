@@ -55,6 +55,15 @@ export const FactSchema = z.object({
   turn: z.number().int().nonnegative(),
   salience: SalienceSchema.default(0.5),
   tags: z.array(z.string()).default([]),
+  /**
+   * Provenance (DESIGN §9 P1 "抽取溯源"): which turn produced this fact and the
+   * sentence it came from. Without it a fact is an assertion with no way back
+   * to the prose that justifies it.
+   */
+  evidence: z.object({
+    turn: z.number().int().nonnegative(),
+    quote: z.string().default(''),
+  }).optional(),
 });
 
 export const BeatSchema = z.object({
@@ -189,6 +198,8 @@ export const ExtractedFactSchema = z.object({
   object: z.string(),
   tags: Lenient.strArray(),
   salience: z.coerce.number().min(0).max(1).catch(0.5),
+  /** A short verbatim quote supporting the fact (optional; aids traceability). */
+  evidence: z.string().optional(),
 });
 
 export const ExtractedEventSchema = z.object({

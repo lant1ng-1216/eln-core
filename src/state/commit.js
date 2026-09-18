@@ -32,6 +32,8 @@ const TENSION_MAX_STEP = 20;
  * @property {object} delta      - Result of `validateExtraction().blocks`
  * @property {string} [narrative]
  * @property {string[]} [degraded]
+ * @property {boolean} [nearChapterEnd]      - Feeds the seed urgency deadline term
+ * @property {(seed: object) => number} [mentionsOf] - How often a seed resurfaced
  */
 
 /**
@@ -51,7 +53,16 @@ const TENSION_MAX_STEP = 20;
  * @param {CommitInput} input
  * @returns {CommitResult}
  */
-export function applyDelta({ canon: prevCanon, minds: prevMinds, ledgers: prevLedgers, delta = {}, narrative = '', degraded = [] }) {
+export function applyDelta({
+  canon: prevCanon,
+  minds: prevMinds,
+  ledgers: prevLedgers,
+  delta = {},
+  narrative = '',
+  degraded = [],
+  nearChapterEnd = false,
+  mentionsOf = null,
+}) {
   const canon = cloneCanon(prevCanon);
   const minds = cloneMinds(prevMinds);
   const ledgers = cloneLedgers(prevLedgers);
@@ -111,6 +122,7 @@ export function applyDelta({ canon: prevCanon, minds: prevMinds, ledgers: prevLe
       turn,
       salience: f.salience ?? 0.5,
       tags: f.tags ?? [],
+      evidence: { turn, quote: f.evidence ?? '' },
     };
     canon.facts.push(fact);
     factIds.push(fact.id);
@@ -177,8 +189,11 @@ export function applyDelta({ canon: prevCanon, minds: prevMinds, ledgers: prevLe
     chapter.beats.push(BeatSchema.parse({ turn, done: true }));
   }
 
-  // ── Seed urgency (deterministic; mentions refined by the memory layer in P2) ──
-  recomputeUrgency(ledgers, { currentTurn: turn, nearChapterEnd: false });
+  // ── Seed urgency ──
+  // Deterministic: age + how often the thread resurfaced + whether the chapter
+  // is closing. `mentionsOf` comes from the memory layer; without it a seed
+  // ages but never gains a mention bonus.
+  recomputeUrgency(ledgers, { currentTurn: turn, nearChapterEnd, mentionsOf: mentionsOf ?? undefined });
 
   const turnRecord = {
     turn,
