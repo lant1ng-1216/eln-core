@@ -1,11 +1,14 @@
 {
   "name": "@lant1ng/eln-core",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Open-source Agentic Story World Runtime — the narrative engine powering ELN",
   "type": "module",
   "main": "index.js",
   "exports": {
     ".": "./index.js"
+  },
+  "scripts": {
+    "test": "node --test test/*.test.js"
   },
   "keywords": [
     "ai",
@@ -21,6 +24,9 @@
   "license": "Apache-2.0",
   "engines": {
     "node": ">=18"
+  },
+  "dependencies": {
+    "zod": "^3.23.8"
   },
   "repository": {
     "type": "git",

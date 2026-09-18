@@ -1,33 +1,69 @@
 /**
- * ELN Core
+ * ELN Core — public entry point (0.2.0)
  *
- * Open-source Agentic Story World Runtime
- * https://github.com/lant1ng-1216/eln-app
+ * Open-source Agentic Story World Runtime.
+ * https://github.com/lant1ng-1216/eln-core
  *
  * @example
- * import { ELNRuntime } from 'eln-core'
+ * import { ELNRuntime, genrePack, stylePack } from '@lant1ng/eln-core'
  *
- * const eln = new ELNRuntime({ apiKey: 'sk-...' })
- * const world = await eln.generateWorld('ancient')
+ * const eln = new ELNRuntime({
+ *   apiKey: 'sk-...',
+ *   packs: [genrePack('republican'), stylePack('zh-literary')],
+ * })
+ *
+ * const world = await eln.generateWorld({ genre: 'republican' })
  * eln.loadWorld(world)
- *
- * eln.onLine = line => console.log(line)
  * const result = await eln.runTurn()
  */
 
-export { ELNRuntime }         from './src/runtime.js';
-export { LLMClient }          from './src/llm-client.js';
+// Facade
+export { ELNRuntime } from './src/runtime.js';
+
+// Transport
+export { LLMClient, LLMError, createSSEParser } from './src/transport/llm-client.js';
+
+// Contracts — schemas, validation, vocabularies
 export {
-  buildWorldGenPrompt,
-  buildNarrativePrompt,
-  buildStateUpdatePrompt,
-}                             from './src/prompts.js';
+  PREDICATES, PREDICATE_KEYS, isPredicate,
+  ENTITY_KINDS, EVENT_KINDS, EVENT_SOURCES,
+  SEED_KINDS, SEED_STATUSES, STANCES, CHAPTER_STATUSES, TEMPLATES,
+} from './src/contracts/vocab.js';
+export { validateExtraction, validateCanon, parseJSONLoose, formatZodError } from './src/contracts/validate.js';
+
+// State — pure data layer
 export {
-  initFromGeneratedWorld,
-  applyStateUpdate,
-  advanceChapter,
-  createSnapshot,
-  restoreSnapshot,
-  saveWorld,
-  loadWorlds,
-}                             from './src/state.js';
+  canonFromGeneratedWorld, secretsOf, allSecrets, factsAbout,
+  entityById, entityByName, resolveRef, currentChapter, makeIdFactory,
+} from './src/state/canon.js';
+export { createMinds, mindFor, stanceOn, knowsFact, addKnowledge, adjustTrust } from './src/state/mind.js';
+export {
+  createLedgers, addEvent, addSeed, paySeed, openSeeds, seedsByUrgency,
+  computeUrgency, eventsOnTurn, linkCausality,
+} from './src/state/ledger.js';
+export { VersionStore } from './src/state/version.js';
+export { applyDelta } from './src/state/commit.js';
+
+// Mind — perspective projection
+export { projectCanon, hiddenSecrets, canSee } from './src/mind/project.js';
+
+// Expression — packs, composition, rendering
+export {
+  genrePack, GENRE_PACKS, GENRE_KEYS,
+  stylePack, STYLE_PACKS, STYLE_KEYS,
+  constraintPack, CONSTRAINT_PACKS, CONSTRAINT_KEYS,
+} from './src/expression/packs/index.js';
+export { compose, normalizePacks, buildWorldGenPrompt, buildExtractionPrompt } from './src/expression/compose.js';
+export { assembleContext } from './src/expression/render.js';
+
+// Orchestration
+export { Director, createDirector, tensionTargetFor, HOOK_KINDS } from './src/orchestration/director.js';
+export { runTurn, TurnFailedError } from './src/orchestration/turn.js';
+export { extractWithRepair, buildRepairPrompt } from './src/orchestration/repair.js';
+
+// Memory — adapters and persistence
+export { MemoryStorage, LocalStorageStorage, createDefaultStorage } from './src/memory/adapters/index.js';
+export {
+  saveWorld, loadWorld, loadWorlds, deleteWorld,
+  serializeState, deserializeState,
+} from './src/memory/store.js';

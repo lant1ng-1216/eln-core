@@ -1,322 +1,440 @@
 /**
  * ELN Core — Runtime
  *
- * The main entry point. Orchestrates world generation, turn execution,
- * state updates, and snapshot management.
+ * The single stateful entry point (DESIGN §1). Everything below it is pure or
+ * injected; this class is the only place that holds mutable state across turns
+ * and the only place a caller needs to know about.
  *
- * Usage:
- *   import { ELNRuntime } from './src/runtime.js'
+ * @example
+ * import { ELNRuntime, genrePack, stylePack } from 'eln-core'
  *
- *   const eln = new ELNRuntime({ apiKey: 'sk-...' })
+ * const eln = new ELNRuntime({
+ *   apiKey: 'sk-...',
+ *   packs: [genrePack('republican'), stylePack('zh-literary')],
+ *   onToken: t => process.stdout.write(t),
+ * })
  *
- *   // Generate a world
- *   const world = await eln.generateWorld('ancient')
- *   eln.loadWorld(world)
- *
- *   // Run a turn
- *   const result = await eln.runTurn()
- *
- *   // Get current state
- *   const { worldState, characters, chapters } = eln.getState()
+ * const world = await eln.generateWorld({ genre: 'republican' })
+ * eln.loadWorld(world)
+ * await eln.runTurn()
  */
 
-import { LLMClient } from './llm-client.js';
-import { buildWorldGenPrompt, buildNarrativePrompt, buildStateUpdatePrompt } from './prompts.js';
-import {
-  initFromGeneratedWorld,
-  applyStateUpdate,
-  advanceChapter,
-  createSnapshot,
-  restoreSnapshot,
-  saveWorld,
-  loadWorlds,
-} from './state.js';
+import { LLMClient } from './transport/llm-client.js';
+import { runTurn as runTurnTransaction } from './orchestration/turn.js';
+import { Director } from './orchestration/director.js';
+import { canonFromGeneratedWorld, resolveRef, secretsOf, entityByName } from './state/canon.js';
+import { createMinds, mindFor, adjustTrust } from './state/mind.js';
+import { createLedgers } from './state/ledger.js';
+import { applyDelta } from './state/commit.js';
+import { VersionStore } from './state/version.js';
+import { projectCanon } from './mind/project.js';
+import { openSeeds } from './state/ledger.js';
+import { validateGeneratedWorld } from './contracts/validate.js';
+import { createDefaultStorage } from './memory/adapters/index.js';
+import { saveWorld, loadWorld, loadWorlds, deleteWorld } from './memory/store.js';
+import { buildWorldGenPrompt } from './expression/compose.js';
+
+const DEFAULT_API_BASE = 'https://api.deepseek.com';
+const DEFAULT_MODEL = 'deepseek-chat';
 
 export class ELNRuntime {
   /**
-   * @param {import('./types.js').ELNRuntimeOptions} options
+   * @param {object} options
+   * @param {string} options.apiKey
+   * @param {string} [options.apiBase]
+   * @param {string} [options.model]        - Single-model shorthand
+   * @param {{narrative?: string, extraction?: string, director?: string, critic?: string}} [options.models]
+   * @param {Array} [options.packs]
+   * @param {'director'|'character'} [options.mode]
+   * @param {string} [options.playerEntityId]
+   * @param {object} [options.storage]
+   * @param {object} [options.retriever]
+   * @param {number} [options.maxRepair]
+   * @param {Function} [options.onToken]
+   * @param {Function} [options.onLine]
+   * @param {Function} [options.onTurnEnd]
+   * @param {Function} [options.onEvent]
    */
   constructor(options = {}) {
-    const { apiKey, model, apiBase, onToken, onLine, onTurnEnd } = options;
+    const {
+      apiKey,
+      apiBase = DEFAULT_API_BASE,
+      model = DEFAULT_MODEL,
+      models = {},
+      packs = [],
+      mode = 'director',
+      playerEntityId = null,
+      storage,
+      retriever = null,
+      maxRepair = 1,
+      fetchImpl,
+      onToken, onLine, onTurnEnd, onEvent,
+    } = options;
 
-    this._client = new LLMClient({ apiKey, model, apiBase });
+    const clientOpts = { apiKey, apiBase, fetchImpl };
+    const narrativeModel = models.narrative ?? model;
+    const extractionModel = models.extraction ?? models.narrative ?? model;
 
-    // Callbacks
-    this._onToken   = onToken   ?? null;
-    this._onLine    = onLine    ?? null;
+    this._narrativeClient = new LLMClient({ ...clientOpts, model: narrativeModel });
+    this._extractionClient = new LLMClient({ ...clientOpts, model: extractionModel });
+
+    this._packs = packs;
+    this._mode = mode;
+    this._playerEntityId = playerEntityId;
+    this._storage = storage ?? createDefaultStorage();
+    this._retriever = retriever;
+    this._director = new Director();
+    this._maxRepair = maxRepair;
+
+    this._onToken = onToken ?? null;
+    this._onLine = onLine ?? null;
     this._onTurnEnd = onTurnEnd ?? null;
+    this._onEvent = onEvent ?? null;
 
-    // Runtime state
-    this._worldState  = null;
-    this._characters  = [];
-    this._chapters    = [];
-    this._turns       = [];
-    this._snapshots   = [];
-    this._directives  = {};  // per-character one-shot directives
-    this._isRunning   = false;
+    // State
+    this._canon = null;
+    this._minds = null;
+    this._ledgers = null;
+    this._turnRecords = [];
+    this._versions = null;
+    this._directives = {};
+    this._chapterHint = '';
+    this._isRunning = false;
   }
 
-  // ── World Generation ──────────────────────────────────────────────────────
+  // ── Configuration ─────────────────────────────────────────────────────────
+
+  get mode() { return this._mode; }
+  get playerEntityId() { return this._playerEntityId; }
 
   /**
-   * Generate a new world from a template key or free-form prompt.
-   * Does NOT load the world — call loadWorld() after.
-   *
-   * @param {string|null} templateKey  - e.g. 'ancient', 'republican', 'mystery'
-   * @param {string|null} userPrompt   - Free-form description
-   * @returns {Promise<import('./types.js').GeneratedWorld>}
+   * Switch between `'director'` and `'character'`.
+   * @param {'director'|'character'} mode
+   * @param {string} [playerEntityId]
    */
-  async generateWorld(templateKey = null, userPrompt = null) {
-    if (!templateKey && !userPrompt) {
-      throw new Error('[ELN] Provide either templateKey or userPrompt');
+  setMode(mode, playerEntityId) {
+    if (mode !== 'director' && mode !== 'character') {
+      throw new Error(`[ELN] Unknown mode "${mode}"`);
     }
-    const prompt = buildWorldGenPrompt(templateKey, userPrompt);
-    const text = await this._client.complete(prompt, 1200);
-    return LLMClient.parseJSON(text);
+    if (mode === 'character' && !(playerEntityId ?? this._playerEntityId)) {
+      throw new Error('[ELN] character mode requires a playerEntityId');
+    }
+    this._mode = mode;
+    if (playerEntityId !== undefined) this._playerEntityId = playerEntityId;
+  }
+
+  // ── World generation ───────────────────────────────────────────────────────
+
+  /**
+   * Generate a world. Does not load it — call `loadWorld()` after.
+   *
+   * @param {{genre?: string, prompt?: string}} [input]
+   * @returns {Promise<object>} the validated generated world
+   */
+  async generateWorld(input = {}) {
+    const args = typeof input === 'string' ? { genre: input } : input;
+    const prompt = buildWorldGenPrompt(args);
+    const text = await this._narrativeClient.complete(prompt, { maxTokens: 1600 });
+    return validateGeneratedWorld(LLMClient.parseJSON(text));
   }
 
   /**
    * Initialize runtime state from a generated world.
-   *
-   * @param {import('./types.js').GeneratedWorld} generatedWorld
+   * @param {object} generatedWorld
    */
   loadWorld(generatedWorld) {
-    const { worldState, characters, chapters } = initFromGeneratedWorld(generatedWorld);
-    this._worldState = worldState;
-    this._characters = characters;
-    this._chapters   = chapters;
-    this._turns      = [];
-    this._snapshots  = [];
+    const world = validateGeneratedWorld(generatedWorld);
+    const canon = canonFromGeneratedWorld(world);
+    this._canon = canon;
+    this._minds = createMinds(canon);
+    this._ledgers = createLedgers();
+    this._turnRecords = [];
+    this._versions = new VersionStore(this._snapshotState());
     this._directives = {};
+    this._chapterHint = '';
+    return this.getState();
   }
 
-  /**
-   * Load previously saved state directly (e.g. from localStorage).
-   *
-   * @param {object} snapshot  - { worldState, characters, chapters }
-   */
-  loadSnapshot(snapshot) {
-    const restored = restoreSnapshot(snapshot);
-    this._worldState = restored.worldState;
-    this._characters = restored.characters;
-    this._chapters   = restored.chapters;
-    this._turns      = restored.turns;
+  /** Restore a previously saved state into the runtime. */
+  loadState(state) {
+    this._canon = state.canon;
+    this._minds = state.minds;
+    this._ledgers = state.ledgers ?? createLedgers();
+    this._turnRecords = state.turnRecords ?? [];
+    this._versions = new VersionStore(this._snapshotState());
+    return this.getState();
   }
 
-  // ── Turn Execution ────────────────────────────────────────────────────────
+  // ── Turn execution ─────────────────────────────────────────────────────────
 
   /**
-   * Run one turn: stream narrative, then extract state update.
+   * Run one turn. On any failure the state is left exactly as it was — turn
+   * counters cannot drift (DESIGN §5.1).
    *
    * @param {object} [options]
-   * @param {string} [options.intervention]  - God-mode event injection
-   * @returns {Promise<import('./types.js').TurnResult>}
+   * @param {string} [options.intervention] - God-mode event (director mode only)
+   * @param {string} [options.action]       - Player action (character mode)
+   * @param {AbortSignal} [options.signal]
+   * @returns {Promise<object>} the turn result
    */
   async runTurn(options = {}) {
     if (this._isRunning) throw new Error('[ELN] A turn is already running');
-    if (!this._worldState) throw new Error('[ELN] No world loaded. Call loadWorld() first.');
+    if (!this._canon) throw new Error('[ELN] No world loaded. Call loadWorld() first.');
+
+    const { intervention = '', action = '', signal } = options;
+
+    if (intervention && this._mode === 'character') {
+      throw new Error(
+        '[ELN] `intervention` is director-only. Use `action` in character mode, ' +
+        'or `injectWorldEvent()` to change the world without leaking knowledge.'
+      );
+    }
 
     this._isRunning = true;
-    const { intervention = '' } = options;
-
-    // Advance turn counter
-    this._worldState.turn++;
-    const ch = this._chapters[this._worldState.currentChapter];
-    if (ch) ch.completedTurns++;
-
-    // Consume one-shot chapter hint
-    const hint = this._worldState._nextChapterHint;
-    setTimeout(() => { this._worldState._nextChapterHint = ''; }, 0);
-
     try {
-      // ── Step 1: Streaming narrative ──
-      const narrativePrompt = buildNarrativePrompt(
-        this._worldState,
-        this._characters,
-        this._chapters,
-        this._turns,
-        { intervention, charDirectives: this._directives }
-      );
-      this._directives = {};  // clear one-shot directives
-
-      let lineBuffer = '';
-      const narrativeText = await this._client.stream(
-        narrativePrompt,
-        delta => {
-          this._onToken?.(delta);
-          lineBuffer += delta;
-          const parts = lineBuffer.split('\n');
-          for (let i = 0; i < parts.length - 1; i++) {
-            const line = parts[i].trim();
-            if (line) this._onLine?.(line);
-          }
-          lineBuffer = parts[parts.length - 1];
+      const { state, turnResult } = await runTurnTransaction({
+        state: {
+          canon: this._canon,
+          minds: this._minds,
+          ledgers: this._ledgers,
+          turnRecords: this._turnRecords,
         },
-        3000
-      );
-      // Flush last line
-      if (lineBuffer.trim()) this._onLine?.(lineBuffer.trim());
+        packs: this._packs,
+        narrativeClient: this._narrativeClient,
+        extractionClient: this._extractionClient,
+        director: this._director,
+        mode: this._mode,
+        holderId: this._playerEntityId,
+        intervention,
+        action,
+        directives: this._directives,
+        onToken: this._onToken,
+        onLine: this._onLine,
+        onEvent: this._onEvent,
+        budget: null,
+        maxRepair: this._maxRepair,
+        signal,
+        extraNotes: this._chapterHint ? [`本章聚焦：${this._chapterHint}`] : [],
+      });
 
-      // ── Step 2: Silent state update ──
-      const statePrompt = buildStateUpdatePrompt(
-        narrativeText,
-        this._worldState,
-        this._characters
-      );
-      const stateText = await this._client.complete(statePrompt, 800);
-      const stateUpdate = LLMClient.parseJSON(stateText);
+      // Commit a version only after the whole transaction succeeded.
+      state.canon.version = this._versions.commit(state);
 
-      // ── Step 3: Apply update ──
-      const result = applyStateUpdate(
-        stateUpdate,
-        this._worldState,
-        this._characters,
-        this._chapters,
-        narrativeText
-      );
-
-      this._worldState = result.worldState;
-      this._characters = result.characters;
-      this._chapters   = result.chapters;
-      this._turns.push(result.turnRecord);
-
-      const turnResult = {
-        narrativeText,
-        stateUpdate,
-        worldState:    this._worldState,
-        characters:    this._characters,
-        chapters:      this._chapters,
-        secretReveals: result.secretReveals,
-        editorNote:    result.editorNote,
-        suggestClose:  result.suggestClose,
-        summary:       result.turnRecord.summary,
-      };
+      this._canon = state.canon;
+      this._minds = state.minds;
+      this._ledgers = state.ledgers;
+      this._turnRecords = state.turnRecords;
+      this._directives = {};
+      this._chapterHint = '';
 
       this._onTurnEnd?.(turnResult);
       return turnResult;
-
     } finally {
       this._isRunning = false;
     }
   }
 
-  // ── God Mode Controls ─────────────────────────────────────────────────────
+  // ── God mode ───────────────────────────────────────────────────────────────
 
-  /**
-   * Set a one-shot directive for a specific character in the next turn.
-   *
-   * @param {string} characterName
-   * @param {string} directive
-   */
+  /** Queue a one-shot directive for a character's next turn. */
   setCharDirective(characterName, directive) {
-    this._directives[characterName] = (this._directives[characterName] ?? '') + ' ' + directive;
+    this._directives[characterName] =
+      `${this._directives[characterName] ?? ''} ${directive}`.trim();
+    return this;
   }
 
   /**
-   * Force a character to reveal their secret to another character.
-   *
-   * @param {string} fromName
-   * @param {string} toName
+   * Force a character to reveal a secret to another. This is a **state write**
+   * (it adds the fact to the target's `knows`), not a prompt patch — the
+   * mechanism that replaced 0.1.0's string injection (DESIGN §2.3).
    */
   forceSecretReveal(fromName, toName) {
-    const from = this._characters.find(c => c.name === fromName);
+    if (!this._canon) throw new Error('[ELN] No world loaded.');
+    const fromId = resolveRef(this._canon, fromName);
+    const toId = resolveRef(this._canon, toName);
+    const from = this._canon.entities.find(e => e.id === fromId);
+    const to = this._canon.entities.find(e => e.id === toId);
     if (!from) throw new Error(`[ELN] Character not found: ${fromName}`);
-    this.setCharDirective(fromName, `本回合必须主动向${toName}透露你的秘密：${from.secret}`);
-    // Nudge trust
-    from.trustWith[toName] = Math.min(100, (from.trustWith[toName] ?? 30) + 15);
-    const to = this._characters.find(c => c.name === toName);
-    if (to) to.trustWith[fromName] = Math.min(100, (to.trustWith[fromName] ?? 30) + 10);
+    if (!to) throw new Error(`[ELN] Character not found: ${toName}`);
+
+    const secrets = secretsOf(this._canon, fromId);
+    const toMind = mindFor(this._minds, toId);
+    if (toMind) {
+      for (const secret of secrets) {
+        this._minds.set(toId, {
+          ...toMind,
+          knows: [
+            ...toMind.knows.filter(r => r.factId !== secret.id),
+            { factId: secret.id, confidence: 1, since: this._canon.turn, evidence: [this._canon.turn] },
+          ],
+        });
+      }
+      const target = this._minds.get(toId);
+      adjustTrust(target, fromId, 10, this._canon.turn);
+    }
+
+    this.setCharDirective(from.name, `本回合必须主动向${to.name}透露你的秘密：${secrets.map(s => s.object).join('；')}`);
+    return { from: fromId, to: toId, revealed: secrets.map(s => s.object) };
   }
 
   /**
-   * Advance to next chapter.
-   *
-   * @param {string} [hint]
-   * @returns {boolean} Whether advance was successful (false = story complete)
+   * Inject a world event without touching any Mind (DESIGN §10.5). This is the
+   * character-mode-safe alternative to `intervention`: the world changes, but no
+   * character learns anything they should not.
+   */
+  injectWorldEvent(summary, { kind = 'world' } = {}) {
+    if (!this._canon) throw new Error('[ELN] No world loaded.');
+    const committed = applyDelta({
+      canon: this._canon,
+      minds: this._minds,
+      ledgers: this._ledgers,
+      delta: {
+        events: [{
+          kind,
+          actors: [],
+          location: this._canon.location,
+          time: this._canon.time,
+          summary,
+          source: 'director',
+        }],
+      },
+    });
+    // Take the ledger and turn counters, but leave Minds untouched.
+    this._canon = committed.canon;
+    this._ledgers = committed.ledgers;
+    this._turnRecords = [...this._turnRecords, committed.turnRecord];
+    this._canon.version = this._versions.commit(this._snapshotState());
+    return committed.turnRecord;
+  }
+
+  /**
+   * Advance to the next chapter. From P2 the engine also closes chapters
+   * automatically; this becomes an override (DESIGN §7 breaking change).
+   * @returns {boolean} false when the story has no further chapters
    */
   nextChapter(hint = '') {
-    const { worldState, chapters, advanced } = advanceChapter(
-      this._worldState,
-      this._chapters,
-      hint
-    );
-    this._worldState = worldState;
-    this._chapters   = chapters;
-    return advanced;
+    if (!this._canon) throw new Error('[ELN] No world loaded.');
+    const idx = this._canon.chapterIndex;
+    const next = this._canon.chapters[idx + 1];
+    if (!next) return false;
+    this._canon.chapters[idx].status = 'done';
+    next.status = 'active';
+    this._canon.chapterIndex = idx + 1;
+    this._chapterHint = hint;
+    return true;
   }
 
-  // ── Snapshots ─────────────────────────────────────────────────────────────
+  // ── Branching ──────────────────────────────────────────────────────────────
 
   /**
-   * Save a snapshot of current state.
-   *
-   * @returns {import('./types.js').Snapshot}
+   * Start a new world line from a version (default: current).
+   * @returns {{lineId: string, version: number}}
    */
-  saveSnapshot() {
-    const snap = createSnapshot(
-      this._worldState,
-      this._characters,
-      this._chapters,
-      this._turns
-    );
-    this._snapshots.push(snap);
-    return snap;
+  branch({ from } = {}) {
+    if (!this._versions) throw new Error('[ELN] No world loaded.');
+    return this._versions.branch(from);
   }
 
   /**
-   * Rewind to a snapshot by index (default: last).
-   *
-   * @param {number} [index]
+   * Jump the current world line to a stored version.
+   * Restores canon *and* minds/ledgers — a snapshot that only restored canon
+   * would leave characters remembering a future that no longer happened.
    */
-  rewindTo(index) {
-    const idx = index ?? this._snapshots.length - 1;
-    const snap = this._snapshots[idx];
-    if (!snap) throw new Error(`[ELN] No snapshot at index ${idx}`);
-    // Save current as branch before rewinding
-    this._snapshots.push(createSnapshot(
-      this._worldState, this._characters, this._chapters, this._turns
-    ));
-    this.loadSnapshot(snap);
+  checkout(versionId) {
+    if (!this._versions) throw new Error('[ELN] No world loaded.');
+    const restored = this._versions.checkout(versionId);
+    this._canon = restored.canon;
+    this._minds = restored.minds;
+    this._ledgers = restored.ledgers;
+    this._turnRecords = restored.turnRecords;
+    return this._canon;
   }
 
-  // ── Persistence ───────────────────────────────────────────────────────────
+  /** Version history of the current line. */
+  history() {
+    return this._versions?.history() ?? [];
+  }
 
-  /**
-   * Save world to localStorage.
-   *
-   * @param {string} [userId]  - Default: 'guest'
-   */
-  save(userId = 'guest') {
-    saveWorld(userId, this._worldState, this._characters, this._chapters);
+  // ── Persistence ────────────────────────────────────────────────────────────
+
+  /** Save the current world. Resolves once the storage adapter has written. */
+  async save(userId = 'guest') {
+    if (!this._canon) throw new Error('[ELN] No world loaded.');
+    return saveWorld(this._storage, userId, this._snapshotState());
+  }
+
+  /** Load a saved world by id (default: most recent). */
+  async load(userId = 'guest', worldId = null) {
+    const state = await loadWorld(this._storage, userId, worldId);
+    if (!state) return null;
+    this.loadState(state);
+    return this.getState();
+  }
+
+  /** Summaries of saved worlds. */
+  async listSavedWorlds(userId = 'guest') {
+    return loadWorlds(this._storage, userId);
+  }
+
+  async deleteSavedWorld(userId = 'guest', worldId = '') {
+    return deleteWorld(this._storage, userId, worldId);
   }
 
   /**
-   * Load all saved worlds from localStorage.
-   *
+   * Static convenience for callers without a runtime instance.
    * @param {string} [userId]
-   * @returns {Array}
+   * @param {object} [storage]
    */
-  static getSavedWorlds(userId = 'guest') {
-    return loadWorlds(userId);
+  static async getSavedWorlds(userId = 'guest', storage = createDefaultStorage()) {
+    return loadWorlds(storage, userId);
   }
 
-  // ── State Access ──────────────────────────────────────────────────────────
-
-  /**
-   * Get a read-only snapshot of current runtime state.
-   *
-   * @returns {{ worldState, characters, chapters, turns, snapshots }}
-   */
-  getState() {
+  _snapshotState() {
     return {
-      worldState: this._worldState,
-      characters: this._characters,
-      chapters:   this._chapters,
-      turns:      this._turns,
-      snapshots:  this._snapshots,
+      canon: this._canon,
+      minds: this._minds,
+      ledgers: this._ledgers,
+      turnRecords: this._turnRecords,
     };
   }
 
-  get isRunning()    { return this._isRunning; }
-  get isWorldLoaded(){ return this._worldState !== null; }
+  // ── Read models ────────────────────────────────────────────────────────────
+
+  /**
+   * @param {{perspective?: string}} [options]
+   *   `perspective` returns that holder's projected View instead of raw state.
+   */
+  getState({ perspective } = {}) {
+    if (perspective) {
+      return projectCanon(this._canon, mindFor(this._minds, perspective), 'character', perspective);
+    }
+    return {
+      canon: this._canon,
+      minds: this._minds,
+      events: this._ledgers?.events ?? [],
+      seeds: this._ledgers?.seeds ?? [],
+      turns: this._turnRecords,
+    };
+  }
+
+  /** Open/paid/abandoned seeds, filtered. */
+  listSeeds({ status = 'open' } = {}) {
+    const seeds = this._ledgers?.seeds ?? [];
+    return status ? seeds.filter(s => s.status === status) : seeds;
+  }
+
+  /** Convenience: the open seeds, most urgent first (what the director sees). */
+  getOpenSeeds() {
+    return openSeeds(this._ledgers ?? createLedgers());
+  }
+
+  /** Resolve a character name to its entity. */
+  getCharacter(nameOrId) {
+    if (!this._canon) return undefined;
+    return entityByName(this._canon, nameOrId)
+      ?? this._canon.entities.find(e => e.id === nameOrId);
+  }
+
+  get isRunning() { return this._isRunning; }
+  get isWorldLoaded() { return this._canon !== null; }
 }
