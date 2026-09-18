@@ -214,6 +214,11 @@ ${predicateList}
 - 只有当叙事中某角色明确知晓/怀疑/误信了 facts 数组中第 i 条事实时，才在 knowledge 中填 {"holderId":"角色名","factIndex":i,"stance":"knows|suspects|believesFalse"}。
 - 不要凭空推断角色知道全部真相；不知道就省略。
 
+篇幅上限（超出会导致输出被截断、整回合抽取失败）：
+- facts 最多 6 条，events 最多 4 条，seeds 最多 2 条，characters 只列本回合有变化的。
+- evidence 是不超过 15 字的原文片段，不要整句照抄。
+- 未发生变化的世界字段（location/time/tension 之一）可以省略。
+
 只返回合法JSON，不含任何其他文字：
 {"summary":"一句话摘要","world":{"location":"地点","time":"时间","tension":60},"characters":[{"name":"角色名","emotion":"新情绪词","goal":"目标变化或原目标","alive":true,"trust_changes":{"他人名":5}}],"facts":[{"subject":"角色名","predicate":"secret","predicate_raw":"原文","object":"内容","tags":["secret"],"salience":0.8,"evidence":"支撑该事实的原文短句"}],"events":[{"kind":"action","actors":["角色名"],"location":"地点","time":"时间","summary":"发生了什么"}],"seeds":[{"text":"埋下的伏笔","kind":"${SEED_KINDS.join('|')}","holderIds":["角色名"]}],"seed_payoffs":[{"seedId":"sd_tN_M"}],"knowledge":[{"holderId":"角色名","factIndex":0,"stance":"knows"}],"reveals_secret":[{"from":"名","to":"名","content":"内容"}],"editor":{"chapter_progress":0.6,"suggest_close_chapter":false,"note":"15字内评语"}}`;
 }

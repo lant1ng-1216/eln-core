@@ -191,7 +191,6 @@ async function scenarioStyle(opts) {
 
 /** The distinctive detail planted in turn 1; retrieval must resurface it later. */
 const PLANTED_DETAIL = '教堂钟楼的夹层';
-const PLANTED_ACTION = `李明远把那份失踪名单藏进了${PLANTED_DETAIL}里，只有他一个人知道`;
 
 async function scenarioMemory(opts) {
   rule(`P1/P2 长程记忆 · 导演曲线 · 章节自动收尾（${opts.turns} 回合）`);
@@ -207,10 +206,20 @@ async function scenarioMemory(opts) {
 
   const world = await runtime.generateWorld({ genre: 'republican' });
   runtime.loadWorld(world);
+
+  // Names must come from the world the model just generated: this script used to
+  // inject a fixture name that did not exist in the run's cast, so the planted
+  // detail landed on a stranger and nothing downstream could reference it.
+  const cast = world.characters.map(c => c.name);
+  const lead = cast[0];
+  const second = cast[1] ?? cast[0];
+
+  const plantedAction = `${lead}把那份失踪名单藏进了${PLANTED_DETAIL}里，只有${second}不知道`;
   runtime.plantSeed('失踪名单到底藏在哪');
 
-  console.log(`\n世界: ${world.name}｜目标章节数: ${world.chapters.length}｜每章预算: ${runtime.getState().canon.chapters[0].targetTurns} 回合`);
-  console.log(`第 1 回合注入: ${PLANTED_ACTION}\n`);
+  console.log(`\n世界: ${world.name}｜角色: ${cast.join('、')}`);
+  console.log(`章节数: ${world.chapters.length}｜每章预算: ${runtime.getState().canon.chapters[0].targetTurns} 回合`);
+  console.log(`第 1 回合注入: ${plantedAction}\n`);
 
   console.log('回合  张力(实际→目标)  导演回收  检索到旧回合  章节');
   console.log('─'.repeat(72));
@@ -219,10 +228,13 @@ async function scenarioMemory(opts) {
   let retrievalTurn = null;
   let tensionOffCurve = 0;
 
+  let degradedTurns = 0;
+
   for (let i = 0; i < opts.turns; i++) {
     const result = await runtime.runTurn({
-      intervention: i === 0 ? PLANTED_ACTION : '',
+      intervention: i === 0 ? plantedAction : '',
     });
+    if (result.degraded?.length) degradedTurns += 1;
 
     const beat = result.beatSpec;
     const actual = result.canon.tension;
@@ -244,8 +256,23 @@ async function scenarioMemory(opts) {
 
   const state = runtime.getState();
 
-  // ── P1: retrieval actually looked back ──
+  // ── Extraction health ──
+  // The unit suite physically cannot catch this: its mock transport always
+  // returns valid JSON. A degraded turn means part of that turn's state was
+  // silently dropped, which is invisible in the prose.
   console.log('');
+  if (degradedTurns === 0) {
+    pass('extract', `${opts.turns} 个回合的抽取全部完整（无降级字段）`);
+  } else {
+    fail('extract', `有 ${degradedTurns}/${opts.turns} 个回合的抽取被降级`,
+      marks.filter(m => m.degraded?.length)
+        .map(m => `回合${m.turn}: ${m.degraded.join(', ')}`
+          + (m.extractionErrors?.root ? `\n  ${m.extractionErrors.root}` : ''))
+        .join('\n')
+      + '\n（"truncated" 表示抽取输出被 max_tokens 截断，该回合部分状态已丢失）');
+  }
+
+  // ── P1: retrieval actually looked back ──
   if (retrievalTurn) {
     pass('memory', `检索层生效：第 ${retrievalTurn.turn} 回合回捞了第 ${retrievalTurn.from.join('、')} 回合的正文`);
   } else {
@@ -311,8 +338,28 @@ async function scenarioMemory(opts) {
     pass('p2', `张力在章节内紧跟目标（最大偏差 ${worst}）`
       + (tensions.length !== comparable.length ? `；已排除 ${tensions.length - comparable.length} 个章节边界回合` : ''));
   } else {
+    // Distinguish "the loop is broken" from "the model calibrates differently".
+    // Whether the two move together is a different question from whether they
+    // agree in absolute terms, and they need different remedies.
+    let sameSign = 0;
+    let pairs = 0;
+    for (let i = 1; i < comparable.length; i++) {
+      const dActual = comparable[i].actual - comparable[i - 1].actual;
+      const dTarget = comparable[i].target - comparable[i - 1].target;
+      if (dActual === 0 || dTarget === 0) continue;
+      pairs += 1;
+      if (Math.sign(dActual) === Math.sign(dTarget)) sameSign += 1;
+    }
+    const gaps = comparable.map(t => t.actual - t.target);
+    const meanGap = Math.round(gaps.reduce((a, b) => a + b, 0) / gaps.length);
+    const trending = pairs ? `${sameSign}/${pairs} 次同向` : '样本不足';
+
     fail('p2', `有 ${drifting.length} 个回合张力偏离目标超过 30`,
-      drifting.map(d => `回合${d.turn}: 实际 ${d.actual} / 目标 ${d.target}`).join('\n'));
+      drifting.map(d => `回合${d.turn}: 实际 ${d.actual} / 目标 ${d.target}`).join('\n')
+      + `\n趋势: ${trending}（实际与目标是否同向变化）`
+      + `\n平均偏差: ${meanGap > 0 ? '+' : ''}${meanGap}（正=实际持续高于目标）`
+      + '\n若"同向"且平均偏差恒定，是模型张力校准与曲线绝对区间不匹配；'
+      + '若不同向，才是反馈回路失效。前者需要调曲线区间或让曲线对实际值有约束力。');
   }
   read('p2', '张力曲线是否有"张力感"需你读正文判断（数字收敛不等于好看）');
 

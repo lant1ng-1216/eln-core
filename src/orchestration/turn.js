@@ -294,7 +294,10 @@ export async function runTurn({
     extraction = await extractWithRepair({
       client: extractionClient,
       prompt: extractionPrompt,
-      maxTokens: 900,
+      // 900 was too small once facts started carrying an `evidence` quote: a
+      // real extraction overran it, was truncated, and silently extracted
+      // nothing. 2000 leaves room, and the prompt now states explicit caps.
+      maxTokens: 2000,
       maxRepair,
     });
   } catch (error) {

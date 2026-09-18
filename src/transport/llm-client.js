@@ -215,15 +215,23 @@ export class LLMClient {
   }
 
   /**
-   * Non-streaming completion.
-   * @returns {Promise<string>}
+   * Non-streaming completion with response metadata.
+   *
+   * `finishReason` matters: a `'length'` result means the response was cut off
+   * at `maxTokens`, which for a JSON payload surfaces downstream as a confusing
+   * syntax error ("Expected ',' or ']'"). Callers that parse JSON should check
+   * it and retry with a tighter instruction rather than treating it as bad data.
+   *
+   * @returns {Promise<{content: string, finishReason: string|null, reported: boolean}>}
    */
-  async complete(prompt, { maxTokens = 1200, signal, model, temperature } = {}) {
+  async completeWithMeta(prompt, { maxTokens = 1200, signal, model, temperature } = {}) {
     const resp = await this._request(this._body(prompt, { maxTokens, stream: false, model, temperature }), { signal });
     const data = await resp.json();
     if (data.error) throw new LLMError(`[ELN] LLM error: ${data.error.message}`, { retryable: false });
 
     const content = data.choices?.[0]?.message?.content ?? '';
+    const finishReason = data.choices?.[0]?.finish_reason ?? null;
+
     const reported = normalizeUsage(data.usage);
     if (reported) {
       this.usage.add(reported);
@@ -234,7 +242,16 @@ export class LLMClient {
         estimated: true,
       });
     }
-    return content;
+
+    return { content, finishReason, reported: Boolean(reported) };
+  }
+
+  /**
+   * Non-streaming completion.
+   * @returns {Promise<string>}
+   */
+  async complete(prompt, options = {}) {
+    return (await this.completeWithMeta(prompt, options)).content;
   }
 
   /**

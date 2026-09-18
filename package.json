@@ -9,8 +9,9 @@
   },
   "scripts": {
     "test": "node --test test/*.test.js",
-    "verify": "node scripts/verify.js",
-    "mock": "node scripts/mock-server.js"
+    "verify": "node --env-file-if-exists=.env scripts/verify.js",
+    "mock": "node scripts/mock-server.js",
+    "example": "node --env-file-if-exists=.env examples/node-basic.js"
   },
   "keywords": [
     "ai",

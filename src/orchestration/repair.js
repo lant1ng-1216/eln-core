@@ -19,12 +19,23 @@ export const BLOCK_NAMES = Object.freeze([
   'seeds', 'seed_payoffs', 'reveals_secret', 'knowledge',
 ]);
 
+/** Guidance for a response that was cut off by the token cap. */
+const COMPACTNESS = `
+你上一次的输出超过长度上限被**截断**了，JSON 因此不完整。这次务必更紧凑：
+- evidence 每条不超过 15 字，且不要复述正文
+- facts 最多 6 条，events 最多 4 条，seeds 最多 2 条，characters 只列有变化的
+- 不要输出未发生变化的世界字段`;
+
 /**
  * Build the retry prompt. Only the failed blocks are asked for again, and the
  * concrete zod message is included — models fix "expected number, received
  * string" far more reliably than a bare "invalid JSON".
+ *
+ * Truncation gets its own instruction: telling a model "expected ',' or ']'"
+ * when the real problem is that it ran out of room produces another verbose
+ * response that truncates again.
  */
-export function buildRepairPrompt(originalPrompt, degraded, errors) {
+export function buildRepairPrompt(originalPrompt, degraded, errors, { truncated = false } = {}) {
   const detail = degraded
     .map(name => `- ${name}: ${errors[name] ?? 'invalid'}`)
     .join('\n');
@@ -37,22 +48,42 @@ export function buildRepairPrompt(originalPrompt, degraded, errors) {
 你上一次的输出中以下部分不符合 schema，请修正后**只返回一个完整 JSON 对象**（不要解释）：
 ${detail}
 
-必须正确包含这些块：${blocks.join('、')}`;
+必须正确包含这些块：${blocks.join('、')}${truncated ? `\n${COMPACTNESS}` : ''}`;
 }
 
 async function runOnce(client, prompt, maxTokens) {
   // A transport failure is hard: it propagates so the caller can roll the turn
   // back. A *content* failure is soft: unparseable output is treated as a
   // degraded root, which makes it repairable instead of fatal.
-  const text = await client.complete(prompt, { maxTokens });
+  //
+  // `finishReason` is requested so truncation is diagnosed as truncation rather
+  // than as malformed data — the remedies are different.
+  const meta = typeof client.completeWithMeta === 'function'
+    ? await client.completeWithMeta(prompt, { maxTokens })
+    : { content: await client.complete(prompt, { maxTokens }), finishReason: null };
+
+  const text = meta.content ?? '';
+  const truncated = meta.finishReason === 'length';
 
   try {
-    return validateExtraction(parseJSONLoose(text));
+    const result = validateExtraction(parseJSONLoose(text));
+    if (truncated) {
+      // It happened to parse, but the payload was cut short: some of the turn
+      // was silently lost, so say so.
+      result.degraded = [...result.degraded, 'truncated'];
+      result.errors = { ...result.errors, truncated: `输出达到 max_tokens=${maxTokens} 上限` };
+    }
+    return { ...result, truncated };
   } catch (error) {
     return {
       blocks: {},
       degraded: ['root'],
-      errors: { root: `unparseable response: ${error.message}` },
+      errors: {
+        root: truncated
+          ? `输出被 max_tokens=${maxTokens} 截断，JSON 不完整`
+          : `unparseable response: ${error.message}`,
+      },
+      truncated,
     };
   }
 }
@@ -63,23 +94,29 @@ function attempted(name, result) {
 }
 
 /**
- * Per-block merge: first validated attempt wins; otherwise take the retry's.
- * Item-level losses (`characters[3]`) are inherited from whichever attempt's
- * array was actually adopted.
+ * Per-block merge. A validated attempt wins, **unless it was truncated** — a
+ * cut-off response is known to be incomplete, so a complete retry supersedes it
+ * even though the first one technically parsed.
  *
- * A block that is merely *absent* from both attempts is not degraded — the
- * extraction schema has many optional blocks, and omitting one is not a failure.
- * Only a block that was present and failed is reported.
+ * Item-level losses (`characters[3]`) are inherited from whichever attempt's
+ * array was actually adopted. A block that is merely *absent* from both is not
+ * degraded: the schema has many optional blocks, and omitting one is not a
+ * failure. Only a block that was present and failed is reported.
  */
 function merge(first, second) {
   const blocks = {};
   const degraded = [];
   const errors = {};
+  let adoptedTruncated = false;
 
   for (const name of BLOCK_NAMES) {
     const a = first.blocks[name];
     const b = second.blocks[name];
-    const source = a !== undefined ? first : b !== undefined ? second : null;
+
+    let source = null;
+    if (a !== undefined && b !== undefined) source = first.truncated ? second : first;
+    else if (a !== undefined) source = first;
+    else if (b !== undefined) source = second;
 
     if (!source) {
       if (attempted(name, first) || attempted(name, second)) {
@@ -88,6 +125,8 @@ function merge(first, second) {
       }
       continue;
     }
+
+    if (source.truncated) adoptedTruncated = true;
 
     blocks[name] = source.blocks[name];
     for (const d of source.degraded) {
@@ -99,10 +138,19 @@ function merge(first, second) {
   }
 
   // Neither attempt produced usable JSON: report the root cause rather than
-  // listing every block as independently broken.
+  // listing every block as independently broken. The *later* error is preferred
+  // because it reflects the largest budget that was tried.
   if (Object.keys(blocks).length === 0) {
-    const root = first.errors.root ?? second.errors.root;
+    const root = second.errors.root ?? first.errors.root;
     if (root) return { blocks, degraded: ['root'], errors: { root } };
+  }
+
+  // Flag only when the content actually adopted came from a truncated attempt:
+  // if the retry was complete, nothing was lost and crying wolf would train the
+  // caller to ignore the marker.
+  if (adoptedTruncated) {
+    degraded.push('truncated');
+    errors.truncated ??= '抽取输出曾达到 max_tokens 上限，可能有部分内容丢失';
   }
 
   return { blocks, degraded, errors };
@@ -125,10 +173,16 @@ export async function extractWithRepair({ client, prompt, maxTokens = 900, maxRe
     return { ...first, attempts: 1 };
   }
 
-  const retryPrompt = buildRepairPrompt(prompt, first.degraded, first.errors);
+  // A truncated response gets a bigger budget *and* a compactness instruction:
+  // the instruction fixes the cause, the budget covers a model that ignores it.
+  const retryBudget = first.truncated ? Math.round(maxTokens * 1.5) : maxTokens;
+  const retryPrompt = buildRepairPrompt(prompt, first.degraded, first.errors, {
+    truncated: first.truncated,
+  });
+
   let second;
   try {
-    second = await runOnce(client, retryPrompt, maxTokens);
+    second = await runOnce(client, retryPrompt, retryBudget);
   } catch (error) {
     // A failed retry must not lose the first attempt's good blocks.
     return { ...first, attempts: 1, repairError: String(error?.message ?? error) };
