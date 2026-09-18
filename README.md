@@ -132,6 +132,8 @@ await eln.generateWorld({ prompt: '三个AI科学家在火星基地，其中一�
 | `maxRewrites` | `number` | `1` | 连续性重写次数上限；0 表示只检测不改写 |
 | `autoAgents` | `boolean` | `true` | 配置 `models.agent` 后是否自动运行幕后行动 |
 | `maxAgents` | `number` | `2` | 每回合最多几个角色在幕后行动 |
+| `tensionBand` | `number` | `20` | 张力观测值相对导演目标的允许偏差（死区） |
+| `tensionCurve` | `{start,end}` | `{25,70}` | 一章内的张力弧线量程 |
 
 > `models.director` / `models.critic` / `models.agent` 都是可选的：配置后用便宜模型补上规则
 > 无法决定的部分（制造什么阻碍 / 语义校对 / 幕后行动），**失败都不影响回合**。
@@ -227,6 +229,26 @@ result.betweenTurns   // { events, actedIds, modelChecked }
 ```js
 await eln.betweenTurns()   // 立即运行并提交一个版本
 ```
+
+### 张力：导演意图与模型读数的死区
+
+`canon.tension` 是**模型从正文里读出来的实际值**，导演另持一个 `tensionTarget` 意图值。二者之间有一个死区：
+
+```js
+// 模型的读数在目标 ±20 内 → 完全采信，导演不干预
+// 超出 → 拉回带边缘，并在回合记录里说明
+eln.runTurn().then(r => {
+  r.turnRecord.tensionClamp   // { observed: 80, applied: 68, target: 48, band: 20 }
+})
+
+// 调旋钮（换题材或换模型时可能需要）
+new ELNRuntime({ apiKey, tensionBand: 15, tensionCurve: { start: 30, end: 85 } })
+```
+
+为什么需要死区：实测中模型读数（50→60→65→75）与导演曲线（23→26→35→46）**同向但永不相交**，
+偏差恒定在 30~40——因为 `tensionTarget` 只能通过 prompt 里一行提示去影响模型，闭环在那一环是断的。
+死区让收敛变成可保证的，同时保留模型在合理范围内的自由（模型本就在带内时不干预）。
+导演每次覆盖都会记进 `turnRecord.tensionClamp`，不静默改数。
 
 ### 连续性守卫与重写
 

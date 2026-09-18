@@ -67,6 +67,7 @@ export { assembleContext } from './src/expression/render.js';
 export {
   Director, createDirector, tensionTargetFor, HOOK_KINDS,
   PAY_URGENCY_THRESHOLD, ESCALATE_URGENCY, SEED_BUDGET, OVERDUE_AGE,
+  TENSION_BAND, TENSION_CURVE,
 } from './src/orchestration/director.js';
 export { runTurn, TurnFailedError } from './src/orchestration/turn.js';
 export { extractWithRepair, buildRepairPrompt, BLOCK_NAMES } from './src/orchestration/repair.js';

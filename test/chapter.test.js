@@ -20,7 +20,7 @@ import {
 } from '../src/orchestration/director.js';
 import { addSeed, recomputeUrgency } from '../src/state/ledger.js';
 import { applyDelta } from '../src/state/commit.js';
-import { tensionTargetFor } from '../src/orchestration/director.js';
+import { tensionTargetFor, TENSION_BAND } from '../src/orchestration/director.js';
 import { MemoryStorage } from '../src/memory/adapters/memory-storage.js';
 import { genrePack } from '../src/expression/packs/genres/index.js';
 import { stylePack } from '../src/expression/packs/styles/index.js';
@@ -412,4 +412,118 @@ test('a story running hot is pulled back toward the curve', () => {
 
   const target = tensionTargetFor(state.canon, chapter);
   assert.ok(target < 30, `a hot story gets a cool target (got ${target})`);
+});
+
+// ── The band: keeping the observation near the intent ────────────────────────
+//
+// A real-model run showed observations sitting 30-40 points above the target
+// indefinitely: `tensionTargetFor` steered the intent, but nothing pulled the
+// observed value, so the two never converged. These lock the closed loop.
+
+/**
+ * Commit a turn whose extraction reports `tension`, under a given target.
+ * `from` sets the starting value so the tests isolate the band from the
+ * per-turn smoothing (the observed value can only move 20 per turn).
+ */
+function observeTension({ from = 30, tension, target = null, band = null, chapter }) {
+  const state = makeState();
+  state.canon.tension = from;
+  if (chapter) Object.assign(state.canon.chapters[0], chapter);
+  return applyDelta({
+    canon: state.canon,
+    minds: state.minds,
+    ledgers: state.ledgers,
+    delta: { world: { tension } },
+    tensionTarget: target,
+    tensionBand: band,
+  });
+}
+
+test('an observation inside the band stands as the actual value', () => {
+  const out = observeTension({ from: 50, tension: 58, target: 50, band: 20 });
+
+  assert.equal(out.canon.tension, 58, 'no override inside the band');
+  assert.equal(out.turnRecord.tensionClamp, undefined, 'nothing to report');
+});
+
+test('an observation exactly at the band edge is left alone', () => {
+  const out = observeTension({ from: 70, tension: 70, target: 50, band: 20 });
+  assert.equal(out.canon.tension, 70);
+  assert.equal(out.turnRecord.tensionClamp, undefined);
+});
+
+test('an observation beyond the band is reeled back and the override is recorded', () => {
+  const out = observeTension({ from: 90, tension: 90, target: 50, band: 20 });
+
+  assert.equal(out.canon.tension, 70, 'clamped to target + band');
+  assert.deepEqual(out.turnRecord.tensionClamp, {
+    observed: 90, applied: 70, target: 50, band: 20,
+  });
+});
+
+test('the band works downward too — a cold reading is pulled up', () => {
+  const out = observeTension({ from: 5, tension: 5, target: 40, band: 20 });
+
+  assert.equal(out.canon.tension, 20, 'clamped to target - band');
+  assert.equal(out.turnRecord.tensionClamp.applied, 20);
+});
+
+test('without a target nothing is clamped — direct applyDelta is unchanged', () => {
+  const out = observeTension({ from: 90, tension: 90 });
+  assert.equal(out.canon.tension, 90);
+  assert.equal(out.turnRecord.tensionClamp, undefined);
+});
+
+test('a zero band makes the target authoritative', () => {
+  const out = observeTension({ tension: 90, target: 50, band: 0 });
+  assert.equal(out.canon.tension, 50);
+});
+
+test('repeated observations converge into the band instead of drifting', () => {
+  // The failure mode from the real run: readings far above the curve, forever.
+  const state = makeState();
+  state.canon.chapters[0].targetTurns = 20;
+
+  const curve = { start: 25, end: 70 };
+  let canon = state.canon;
+  const gaps = [];
+
+  for (let i = 0; i < 6; i++) {
+    const target = tensionTargetFor(canon, canon.chapters[0], curve);
+    // A model that stubbornly reports "maximally tense" every turn.
+    const out = applyDelta({
+      canon,
+      minds: state.minds,
+      ledgers: state.ledgers,
+      delta: { world: { tension: 95 } },
+      tensionTarget: target,
+      tensionBand: TENSION_BAND,
+    });
+    canon = out.canon;
+    gaps.push(Math.abs(canon.tension - target));
+  }
+
+  assert.ok(gaps[0] <= TENSION_BAND, `first turn is already bounded (gap ${gaps[0]})`);
+  assert.ok(
+    gaps.every(g => g <= TENSION_BAND),
+    `every gap must stay within the band: ${gaps.join(', ')}`
+  );
+});
+
+test('the band and the curve are configuration, not constants', () => {
+  const state = makeState();
+  state.canon.tension = 30;
+
+  const tight = new Director({ tensionBand: 5, tensionCurve: { start: 10, end: 20 } });
+  const wide = new Director({ tensionBand: 40 });
+
+  const tightBeat = tight.plan({ canon: state.canon, ledgers: state.ledgers });
+  const wideBeat = wide.plan({ canon: state.canon, ledgers: state.ledgers });
+
+  assert.equal(tightBeat.tensionBand, 5);
+  assert.equal(wideBeat.tensionBand, 40);
+  assert.ok(
+    tightBeat.tensionTarget < wideBeat.tensionTarget,
+    `a lower curve yields a lower target (${tightBeat.tensionTarget} < ${wideBeat.tensionTarget})`
+  );
 });

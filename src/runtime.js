@@ -109,6 +109,10 @@ export class ELNRuntime {
     this._director = new Director({
       client: this._directorClient,
       model: models.director ?? null,
+      // Both are tuning knobs, not constants: how far the model's tension
+      // reading may stray from the director's intent, and the chapter's arc.
+      tensionBand: options.tensionBand,
+      tensionCurve: options.tensionCurve,
     });
     this._guard = new ContinuityGuard({
       client: this._criticClient,

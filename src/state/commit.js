@@ -62,6 +62,8 @@ export function applyDelta({
   degraded = [],
   nearChapterEnd = false,
   mentionsOf = null,
+  tensionTarget = null,
+  tensionBand = null,
 }) {
   const canon = cloneCanon(prevCanon);
   const minds = cloneMinds(prevMinds);
@@ -78,12 +80,35 @@ export function applyDelta({
 
   // ── World block: observed values (DESIGN §10.3 — actual, not intent) ──
   const world = delta.world;
+  let tensionClamp = null;
+
   if (world) {
     if (world.location) canon.location = world.location;
     if (world.time) canon.time = world.time;
+
     if (typeof world.tension === 'number') {
+      // Smooth first: a single scene should not teleport the register.
       const step = clamp(world.tension - canon.tension, -TENSION_MAX_STEP, TENSION_MAX_STEP);
       canon.tension = clamp(canon.tension + step, 0, 100);
+
+      // Then bound it against the director's intent. Measured against a real
+      // model, observations ran 30-40 points above the target indefinitely
+      // because nothing closed this loop — the target only ever reached the
+      // model as a prompt hint. Inside the band the reading stands as the
+      // actual value; outside it, the intent wins.
+      if (typeof tensionTarget === 'number' && Number.isFinite(tensionBand) && tensionBand >= 0) {
+        const error = canon.tension - tensionTarget;
+        if (Math.abs(error) > tensionBand) {
+          const observed = canon.tension;
+          canon.tension = clamp(tensionTarget + Math.sign(error) * tensionBand, 0, 100);
+          tensionClamp = {
+            observed,
+            applied: canon.tension,
+            target: tensionTarget,
+            band: tensionBand,
+          };
+        }
+      }
     }
   }
 
@@ -202,6 +227,9 @@ export function applyDelta({
     summary: delta.summary ?? '',
     degraded,
   };
+  // Observable: when the director had to overrule the model's reading, say so
+  // rather than letting the value change with no explanation.
+  if (tensionClamp) turnRecord.tensionClamp = tensionClamp;
 
   return {
     canon,

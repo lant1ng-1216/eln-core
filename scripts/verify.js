@@ -26,6 +26,7 @@
 import {
   ELNRuntime, genrePack, stylePack,
   assembleContext, compose, checkContinuity, stanceOn,
+  TENSION_BAND,
 } from '../index.js';
 
 // ── CLI ──────────────────────────────────────────────────────────────────────
@@ -221,14 +222,13 @@ async function scenarioMemory(opts) {
   console.log(`章节数: ${world.chapters.length}｜每章预算: ${runtime.getState().canon.chapters[0].targetTurns} 回合`);
   console.log(`第 1 回合注入: ${plantedAction}\n`);
 
-  console.log('回合  张力(实际→目标)  导演回收  检索到旧回合  章节');
-  console.log('─'.repeat(72));
+  console.log('回合  张力(实际→目标)  导演回收  检索到旧回合  章节  导演介入');
+  console.log('─'.repeat(80));
 
   let firstTransition = null;
   let retrievalTurn = null;
-  let tensionOffCurve = 0;
-
   let degradedTurns = 0;
+  let clampedTurns = 0;
 
   for (let i = 0; i < opts.turns; i++) {
     const result = await runtime.runTurn({
@@ -239,18 +239,22 @@ async function scenarioMemory(opts) {
     const beat = result.beatSpec;
     const actual = result.canon.tension;
     const target = beat.tensionTarget;
-    if (Math.abs(actual - target) > 25) tensionOffCurve += 1;
 
     const retrieved = result.blocks.trace.retrievedTurns ?? [];
     if (retrieved.length) retrievalTurn = retrievalTurn ?? { turn: result.turn, from: retrieved };
     if (result.chapterTransition && !firstTransition) firstTransition = result.chapterTransition;
+
+    // The commit reports when the director's intent overruled the model's reading.
+    const clamp = result.turnRecord?.tensionClamp;
+    if (clamp) clampedTurns += 1;
 
     console.log(
       `${String(result.turn).padStart(4)}  `
       + `${String(actual).padStart(3)} → ${String(target).padStart(3)}      `
       + `${String(beat.plantOrPay.length).padStart(2)}        `
       + `${(retrieved.length ? retrieved.join(',') : '-').padEnd(14)}`
-      + `${result.chapterTransition ? `收尾(${result.chapterTransition.reason})` : ''}`
+      + `${(result.chapterTransition ? `收尾(${result.chapterTransition.reason})` : '').padEnd(14)}`
+      + `${clamp ? `${clamp.observed}→${clamp.applied}（带 ±${clamp.band}）` : ''}`
     );
   }
 
@@ -358,8 +362,11 @@ async function scenarioMemory(opts) {
       drifting.map(d => `回合${d.turn}: 实际 ${d.actual} / 目标 ${d.target}`).join('\n')
       + `\n趋势: ${trending}（实际与目标是否同向变化）`
       + `\n平均偏差: ${meanGap > 0 ? '+' : ''}${meanGap}（正=实际持续高于目标）`
-      + '\n若"同向"且平均偏差恒定，是模型张力校准与曲线绝对区间不匹配；'
-      + '若不同向，才是反馈回路失效。前者需要调曲线区间或让曲线对实际值有约束力。');
+      + `\n导演介入: ${clampedTurns}/${comparable.length} 回合被带回 band 内`
+      + '\n若导演已介入而偏差仍大，检查 tensionBand；若从未介入，说明模型读数本就在带内。');
+  }
+  if (clampedTurns && !drifting.length) {
+    console.log(`  （导演在 ${clampedTurns}/${comparable.length} 个回合把偏离的读数带回了 ±${TENSION_BAND} 带内）`);
   }
   read('p2', '张力曲线是否有"张力感"需你读正文判断（数字收敛不等于好看）');
 

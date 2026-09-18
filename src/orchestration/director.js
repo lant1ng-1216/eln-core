@@ -40,6 +40,21 @@ export const OVERDUE_AGE = 10;
 /** Keep at most this many threads open before planting more. */
 export const SEED_BUDGET = 3;
 
+/**
+ * How far the observed tension may sit from the director's target before the
+ * observation is reeled back in.
+ *
+ * Measured against a real model: the observations ran 30-40 points above the
+ * curve and never converged, because the target only reached the model as a
+ * prompt hint and nothing closed the loop. A band keeps the model's reading as
+ * the actual value *inside* the band, and makes convergence guaranteed outside
+ * it — one knob, and the semantics of `canon.tension` survive.
+ */
+export const TENSION_BAND = 20;
+
+/** Default dramatic arc across a chapter, as absolute tension values. */
+export const TENSION_CURVE = Object.freeze({ start: 25, end: 70 });
+
 const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
 
 /**
@@ -57,13 +72,16 @@ const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
  * @property {boolean} [enriched]       - Whether a model contributed to this beat
  */
 
-/** The tension the chapter is aiming for at its current progress. */
-function curveTarget(chapter) {
+/**
+ * The tension the chapter is aiming for at its current progress.
+ * `curve` is data, not a constant, so a genre or a product can retune the arc.
+ */
+function curveTarget(chapter, curve = TENSION_CURVE) {
   if (!chapter) return 40;
   const progress = chapter.targetTurns > 0
     ? Math.min(1, chapter.completedTurns / chapter.targetTurns)
     : 0;
-  return 25 + progress * 45; // rises 25 → 70 across the chapter
+  return curve.start + progress * (curve.end - curve.start);
 }
 
 /**
@@ -71,13 +89,16 @@ function curveTarget(chapter) {
  *
  * Canon's tension is the *observed* value; this is the *intent*. When the prose
  * has been running colder than the curve, the target is pushed up (and vice
- * versa), so the actual value converges on the curve instead of the curve
- * drifting away from the story.
+ * versa), so the target tracks the story instead of marching on independently.
+ *
+ * Note this only steers the *intent*. Keeping the observation near it is the
+ * job of `applyDelta`'s band clamp — without that, the loop is open at exactly
+ * the point that matters, which is what a real-model run exposed.
  */
-export function tensionTargetFor(canon, chapter) {
-  const curve = curveTarget(chapter);
-  const error = curve - canon.tension;
-  return Math.round(clamp(curve + clamp(error * 0.5, -15, 15), 5, 95));
+export function tensionTargetFor(canon, chapter, curve = TENSION_CURVE) {
+  const base = curveTarget(chapter, curve);
+  const error = base - canon.tension;
+  return Math.round(clamp(base + clamp(error * 0.5, -15, 15), 5, 95));
 }
 
 /**
@@ -152,11 +173,20 @@ export class Director {
    * @param {{complete: Function}} [options.client] - Cheap model for `enrich()`
    * @param {string} [options.model]
    */
-  constructor({ maxSeedsPerTurn = 2, maxAdvance = 2, client = null, model = null } = {}) {
+  constructor({
+    maxSeedsPerTurn = 2,
+    maxAdvance = 2,
+    client = null,
+    model = null,
+    tensionBand = TENSION_BAND,
+    tensionCurve = TENSION_CURVE,
+  } = {}) {
     this.maxSeedsPerTurn = maxSeedsPerTurn;
     this.maxAdvance = maxAdvance;
     this.client = client;
     this.model = model;
+    this.tensionBand = tensionBand;
+    this.tensionCurve = { ...TENSION_CURVE, ...tensionCurve };
   }
 
   /**
@@ -233,7 +263,9 @@ export class Director {
       plantOrPay: plantOrPay.slice(0, this.maxSeedsPerTurn),
       plantCount,
       overdue,
-      tensionTarget: tensionTargetFor(canon, chapter),
+      tensionTarget: tensionTargetFor(canon, chapter, this.tensionCurve),
+      /** Passed to the commit so the observed value cannot stray past the band. */
+      tensionBand: this.tensionBand,
       hookKind: HOOK_KINDS[turn % HOOK_KINDS.length],
       constraintNotes,
       playerAction: action || '',

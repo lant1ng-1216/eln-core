@@ -145,7 +145,11 @@ test('runTurn commits narrative, state changes, events and knowledge', async () 
   assert.equal(state.canon.turn, 1);
   assert.equal(state.canon.location, '霞飞路舞厅');
   assert.equal(state.canon.time, '深夜');
-  assert.equal(state.canon.tension, 45);
+  // The extraction reported 45, but the director's target for this beat was 23,
+  // so the observation is reined back to the edge of the band (23 + 20).
+  assert.equal(state.canon.tension, 43);
+  assert.deepEqual(state.turns[0].tensionClamp, { observed: 45, applied: 43, target: 23, band: 20 });
+  assert.equal(result.turnRecord, state.turns[0], 'the result exposes the persisted record');
   assert.equal(state.canon.chapters[0].completedTurns, 1);
   assert.equal(state.events.length, 1);
   assert.equal(state.events[0].source, 'narrative');

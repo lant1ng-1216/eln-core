@@ -333,6 +333,8 @@ export async function runTurn({
     degraded: extraction.degraded,
     nearChapterEnd,
     mentionsOf,
+    tensionTarget: beatSpec.tensionTarget,
+    tensionBand: beatSpec.tensionBand,
   });
 
   // ── 6. Chapter lifecycle ──
@@ -390,6 +392,8 @@ export async function runTurn({
 
   const turnResult = {
     turn: committed.canon.turn,
+    /** The persisted record for this turn (also appended to `state.turns`). */
+    turnRecord: committed.turnRecord,
     narrativeText,
     blocks,
     beatSpec,
