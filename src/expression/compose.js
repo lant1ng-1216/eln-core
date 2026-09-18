@@ -105,6 +105,7 @@ export function compose(packs, blocks, { turn = 1 } = {}) {
   const body = [
     blocks.canonBlock,
     blocks.knowledgeBlock,
+    blocks.povBlock,
     blocks.memoryBlock,
     blocks.seedsBlock,
     blocks.beatBlock,

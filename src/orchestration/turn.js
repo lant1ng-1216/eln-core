@@ -65,7 +65,7 @@ function createLineSplitter(onLine) {
 }
 
 /** Synthesize the ledger event for a god-mode intervention or player action. */
-function injectedEvents({ intervention, action, turn, canon }) {
+function injectedEvents({ intervention, action, playerEntityId, canon }) {
   const events = [];
   if (intervention) {
     events.push({
@@ -80,7 +80,9 @@ function injectedEvents({ intervention, action, turn, canon }) {
   if (action) {
     events.push({
       kind: 'action',
-      actors: [],
+      // The player is the actor — the ledger should make that traceable rather
+      // than recording an orphaned event.
+      actors: playerEntityId ? [playerEntityId] : [],
       location: canon.location,
       time: canon.time,
       summary: action,
@@ -136,12 +138,26 @@ export async function runTurn({
 
   const canon = state.canon;
 
+  // ── 0. The director reviews a player action before it can enter canon ──
+  // Decision §10.4: accept by default, intervene only on a canon violation.
+  // A rejected action aborts the turn before anything is written, so the state
+  // the caller sees is unchanged and they can retry with a different intent.
+  let reviewedAction = (action ?? '').trim();
+  if (reviewedAction && mode === 'character' && typeof director?.reviewAction === 'function') {
+    const review = director.reviewAction(reviewedAction, { canon, playerEntityId: holderId });
+    if (!review.allowed) {
+      throw new TurnFailedError(`[ELN] Player action rejected: ${review.reason}`, { phase: 'action' });
+    }
+    reviewedAction = review.action;
+  }
+
   // ── 1. Director plans the beat ──
   let beatSpec = planBeat(director, {
     canon,
     ledgers: state.ledgers,
     mode,
     holderId,
+    action: reviewedAction,
   });
 
   // Caller-supplied notes (e.g. a chapter hint from `nextChapter`) ride along
@@ -228,7 +244,12 @@ export async function runTurn({
 
   // ── 5. Commit (clones inside; input state untouched) ──
   const delta = { ...extraction.blocks };
-  const injected = injectedEvents({ intervention, action, turn: canon.turn + 1, canon });
+  const injected = injectedEvents({
+    intervention,
+    action: reviewedAction,
+    playerEntityId: mode === 'character' ? holderId : null,
+    canon,
+  });
   if (injected.length) {
     delta.events = [...(delta.events ?? []), ...injected];
   }
@@ -309,6 +330,7 @@ export async function runTurn({
     editor: committed.editor,
     summary: committed.turnRecord.summary,
     chapterTransition,
+    action: reviewedAction,
   };
 
   return { state: nextState, turnResult };

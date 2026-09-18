@@ -52,6 +52,7 @@ const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
  * @property {number} tensionTarget     - Intent value for this turn
  * @property {string} hookKind
  * @property {string[]} constraintNotes
+ * @property {string} [playerAction]    - The reviewed action folded into this beat
  * @property {boolean} [enriched]       - Whether a model contributed to this beat
  */
 
@@ -146,11 +147,13 @@ export class Director {
   /**
    * @param {object} [options]
    * @param {number} [options.maxSeedsPerTurn] - Cap on threads paid per turn
+   * @param {number} [options.maxAdvance] - Cap on characters asked to advance
    * @param {{complete: Function}} [options.client] - Cheap model for `enrich()`
    * @param {string} [options.model]
    */
-  constructor({ maxSeedsPerTurn = 2, client = null, model = null } = {}) {
+  constructor({ maxSeedsPerTurn = 2, maxAdvance = 2, client = null, model = null } = {}) {
     this.maxSeedsPerTurn = maxSeedsPerTurn;
+    this.maxAdvance = maxAdvance;
     this.client = client;
     this.model = model;
   }
@@ -162,10 +165,17 @@ export class Director {
    * @param {import('../contracts/types.js').Canon} input.canon
    * @param {{events: Array, seeds: Array}} [input.ledgers]
    * @param {'director'|'character'} [input.mode]
-   * @param {string} [input.holderId]
+   * @param {string} [input.holderId] - The player, in character mode
+   * @param {string} [input.action]   - The player's declared action, already reviewed
    * @returns {BeatSpec}
    */
-  plan({ canon, ledgers = { events: [], seeds: [] }, mode = 'director', holderId = null }) {
+  plan({
+    canon,
+    ledgers = { events: [], seeds: [] },
+    mode = 'director',
+    holderId = null,
+    action = '',
+  }) {
     const chapter = currentChapter(canon);
     const turn = canon.turn + 1; // the turn about to be written
 
@@ -181,13 +191,29 @@ export class Director {
       }
     }
 
+    let mustAdvance = pickMustAdvance(canon, turn, this.maxAdvance);
+
     if (mode === 'character' && holderId) {
       const holder = canon.entities.find(e => e.id === holderId);
-      if (holder) constraintNotes.push(`必须给 ${holder.name} 留出行动与反应的余地`);
+      if (holder) {
+        // The player is always on stage. Their own thread leads the beat, and
+        // the declared action becomes an obligation rather than a suggestion
+        // (decision §10.4: the action is routed through the director, which
+        // folds it into the same beat the rest of the scene obeys).
+        mustAdvance = [holderId, ...mustAdvance.filter(id => id !== holderId)]
+          .slice(0, this.maxAdvance);
+
+        constraintNotes.push(`必须给 ${holder.name} 留出行动与反应的余地`);
+        if (action) {
+          constraintNotes.push(
+            `玩家本回合的行动：${action}。必须让它在叙事中产生可见后果，不得无视或拖延`
+          );
+        }
+      }
     }
 
     return {
-      mustAdvance: pickMustAdvance(canon, turn),
+      mustAdvance,
       mustComplicate: [],
       plantOrPay: plantOrPay.slice(0, this.maxSeedsPerTurn),
       plantCount,
@@ -195,7 +221,46 @@ export class Director {
       tensionTarget: tensionTargetFor(canon, chapter),
       hookKind: HOOK_KINDS[turn % HOOK_KINDS.length],
       constraintNotes,
+      playerAction: action || '',
     };
+  }
+
+  /**
+   * Review a player action against the hard constraints of canon
+   * (decision §10.4: accept by default, intervene only on a canon violation).
+   *
+   * A violation is *reported*, not silently rewritten. Quietly changing what the
+   * player said they did is worse than refusing: it is indistinguishable from a
+   * bug, and the caller cannot tell why the world ignored them.
+   *
+   * @param {string} action
+   * @param {{canon: object, playerEntityId: string}} context
+   * @returns {{allowed: boolean, action: string, reason: string}}
+   */
+  reviewAction(action, { canon, playerEntityId }) {
+    const text = (action ?? '').trim();
+    if (!text) return { allowed: true, action: '', reason: '' };
+
+    const player = canon.entities.find(e => e.id === playerEntityId);
+    if (!player) {
+      return { allowed: false, action: text, reason: `玩家角色 ${playerEntityId} 不存在于当前世界` };
+    }
+    if (!player.alive) {
+      return { allowed: false, action: text, reason: `${player.name} 已死亡，无法行动` };
+    }
+
+    const deadMentioned = canon.entities.filter(
+      e => e.kind === 'character' && !e.alive && e.name && text.includes(e.name)
+    );
+    if (deadMentioned.length) {
+      return {
+        allowed: false,
+        action: text,
+        reason: `行动涉及已死亡的角色：${deadMentioned.map(e => e.name).join('、')}`,
+      };
+    }
+
+    return { allowed: true, action: text, reason: '' };
   }
 
   /** True when a model is available to contribute semantic judgement. */

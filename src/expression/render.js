@@ -120,6 +120,24 @@ function renderMemoryBlock(turnRecords, retrieved) {
     .filter(Boolean).join('\n');
 }
 
+/**
+ * Point-of-view instruction (DESIGN §3).
+ *
+ * Director mode narrates omnisciently and emits nothing here. Character mode
+ * must *write* from the holder's limited view as well as *filter* to it —
+ * without this block the model still has omniscient habits and leaks knowledge
+ * through narration even when the facts are withheld.
+ */
+function renderPovBlock(view) {
+  if (view.mode !== 'character' || !view.holder) return '';
+  const { name } = view.holder;
+  return `【叙事视角】以${name}的有限视角叙述：
+- 只呈现${name}能看到、听到、触到、想到的内容。
+- 他人的心理活动只能通过外在迹象（表情、语气、动作）暗示，不得直接写出。
+- ${name}尚不知晓的事，不得以旁白方式揭晓，也不得让他凭空说出。
+- 若${name}的认知有误，就按他的错误认知写，不要替他纠正。`;
+}
+
 /** Open threads. Director-only: a character cannot see the author's ledger. */
 function renderSeedsBlock(view, ledgers) {
   if (view.mode !== 'director') return '';
@@ -237,6 +255,7 @@ export function assembleContext({
   const blocks = {
     canonBlock: renderCanonBlock(view),
     knowledgeBlock: renderKnowledgeBlock(view),
+    povBlock: renderPovBlock(view),
     memoryBlock: renderMemoryBlock(turnRecords, retrieved),
     seedsBlock: renderSeedsBlock(view, ledgers),
     beatBlock: renderBeatBlock(beatSpec, canon, ledgers),

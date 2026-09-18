@@ -22,8 +22,8 @@
 import { LLMClient } from './transport/llm-client.js';
 import { runTurn as runTurnTransaction } from './orchestration/turn.js';
 import { Director } from './orchestration/director.js';
-import { canonFromGeneratedWorld, resolveRef, secretsOf, entityByName } from './state/canon.js';
-import { createMinds, mindFor, adjustTrust } from './state/mind.js';
+import { canonFromGeneratedWorld, resolveRef, secretsOf, entityByName, cloneCanon } from './state/canon.js';
+import { createMinds, mindFor, adjustTrust, cloneMinds, setTrust } from './state/mind.js';
 import { createLedgers, addSeed } from './state/ledger.js';
 import { applyDelta } from './state/commit.js';
 import { VersionStore } from './state/version.js';
@@ -125,6 +125,11 @@ export class ELNRuntime {
 
   /**
    * Switch between `'director'` and `'character'`.
+   *
+   * Switching modes is a *projection* change, not a state change (DESIGN §3):
+   * the same Canon and the same Minds are read through a different lens, so
+   * round-tripping is lossless.
+   *
    * @param {'director'|'character'} mode
    * @param {string} [playerEntityId]
    */
@@ -135,8 +140,63 @@ export class ELNRuntime {
     if (mode === 'character' && !(playerEntityId ?? this._playerEntityId)) {
       throw new Error('[ELN] character mode requires a playerEntityId');
     }
+    if (mode === 'character') {
+      const id = playerEntityId ?? this._playerEntityId;
+      if (this._canon && !this._canon.entities.some(e => e.id === id)) {
+        throw new Error(`[ELN] Unknown playerEntityId "${id}". Use createPlayer() or pass an existing character id.`);
+      }
+    }
     this._mode = mode;
     if (playerEntityId !== undefined) this._playerEntityId = playerEntityId;
+  }
+
+  /**
+   * Add a player character to the current world.
+   *
+   * The player is an ordinary entity with a Mind of its own — the engine only
+   * narrates from their viewpoint. Nothing special-cases them, which is why
+   * switching into character mode cannot leak information: there is no
+   * "player privileges" path to leak through.
+   *
+   * @param {{name: string, role?: string, personality?: string, goal?: string, weightTag?: string}} input
+   * @returns {object} the created entity
+   */
+  createPlayer({ name, role = '', personality = '', goal = '', weightTag = '男主' } = {}) {
+    if (!this._canon) throw new Error('[ELN] No world loaded.');
+    if (!name) throw new Error('[ELN] createPlayer requires a name');
+    if (this.getCharacter(name)) throw new Error(`[ELN] Character already exists: ${name}`);
+
+    const canon = cloneCanon(this._canon);
+    const id = `p${canon.entities.filter(e => e.tags?.includes('player')).length + 1}`;
+
+    canon.entities.push({
+      id,
+      kind: 'character',
+      name,
+      role,
+      personality,
+      goal,
+      alive: true,
+      emotion: '平静',
+      weightTag,
+      tags: ['player'],
+    });
+
+    const minds = cloneMinds(this._minds);
+    const trust = {};
+    for (const other of canon.entities) {
+      if (other.id === id || other.kind !== 'character') continue;
+      trust[other.id] = { value: 30, evidence: [] };
+      const otherMind = mindFor(minds, other.id);
+      if (otherMind && !otherMind.trust[id]) setTrust(otherMind, id, 30, canon.turn);
+    }
+    minds.set(id, { holderId: id, knows: [], suspects: [], believesFalse: [], trust });
+
+    this._canon = canon;
+    this._minds = minds;
+    this._canon.version = this._versions.commit(this._snapshotState());
+
+    return canon.entities[canon.entities.length - 1];
   }
 
   // ── World generation ───────────────────────────────────────────────────────
@@ -207,6 +267,12 @@ export class ELNRuntime {
       throw new Error(
         '[ELN] `intervention` is director-only. Use `action` in character mode, ' +
         'or `injectWorldEvent()` to change the world without leaking knowledge.'
+      );
+    }
+    if (action && this._mode === 'director') {
+      throw new Error(
+        '[ELN] `action` is character-mode only. Use `intervention` in director mode, ' +
+        'or call `setMode(\'character\', playerEntityId)` first.'
       );
     }
 

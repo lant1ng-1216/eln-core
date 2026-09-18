@@ -25,7 +25,7 @@ Canon（客观真相） ──投影──▶ Mind（各主体私有视角）─
 | **长期记忆** | 正文逐回合留存并可检索，事件账本记录"真正发生了什么"及其因果链，伏笔账本追踪埋下的线是否回收。第 6 回合仍能引用第 2 回合的细节。 |
 | **导演层** | 每回合先规划 `BeatSpec`：必须推进谁的目标、必须处理哪条伏笔、张力目标、收尾钩子。给的是**戏剧指令**，不是文风指令。逾期的伏笔会升级为硬性要求，直到被回收。 |
 | **章节自收尾** | 章节按判据收尾：承诺回收的伏笔已回收、目标已达成，或回合预算耗尽。不需要你记得调用 `nextChapter()`。 |
-| **视角可切换** | `director`（看全量真相）与 `character`（只看该角色所知）是同一次投影，只换 `holderId`。 |
+| **视角可切换** | `director`（全知）与 `character`（有限视角）是同一次投影，只换 `holderId`。切模式不改状态，来回切换无损耗。角色模式不仅过滤情报，还按该角色的错误认知叙述。 |
 | **回合即事务** | 任一步失败则整回合回滚，计数器绝不漂移。 |
 
 **UI 无关 · 题材/文风/存储/检索全部可插拔。**
@@ -138,6 +138,28 @@ await eln.runTurn({ intervention?, action? })// 推进一回合
 eln.getState()                               // { canon, minds, events, seeds, turns }
 eln.getState({ perspective: holderId })      // 该角色的视角视图
 ```
+
+### 双模式（玩家视角）
+
+```js
+// 玩家是一个普通实体 —— 没有特权通道，所以不存在越权信息
+const player = eln.createPlayer({ name: '林默', role: '报馆记者', goal: '查清名单' })
+
+eln.setMode('character', player.id)
+
+// 玩家行动会先经导演复核（硬约束：玩家已死亡、行动涉及已死者）
+// 通过后被折进本回合的戏剧任务：玩家自己的目标排进 mustAdvance 首位
+await eln.runTurn({ action: '我撬开档案柜，翻找名单' })
+
+eln.setMode('director')     // 切回全知；状态未被改动过
+eln.getState({ perspective: player.id })   // 玩家眼中的世界（只含他已知的事实）
+```
+
+在 character 模式下：
+- 提示词带 `【叙事视角】` 块，要求按该角色的**有限视角**叙述，他人心理只能外化暗示，
+  且按其错误认知书写而不替他纠正。
+- 其他角色的秘密不会出现在提示词里——这是结构保证，不是措辞约束。
+- `intervention` 会抛错（用 `action` 或 `injectWorldEvent()`）；`action` 在 director 模式下会抛错。
 
 ### 上帝模式
 
