@@ -1,6 +1,7 @@
-# eln-core v2 设计文档（草案 · 待评审）
+# eln-core v2 设计文档
 
-> 状态：**草案，未实现**。本文档用于逐层评审，细节确认后再进入编码。
+> 状态：**已实现**（P0→P5，见 §9）。本文档作为架构参考保留。
+> 实现过程中对 §2.2、§4、§5.1、§10.4 的偏离与取舍，记录在 `CHANGELOG.md` 的「设计偏离说明」。
 > 目标版本：`0.2.0`（破坏性升级）
 
 ---
@@ -367,11 +368,33 @@ P0 阶段即写入 knowledge 的数据结构（渲染可留到 P1），因为视
 
 ---
 
-## 11. 文档同步待办
+## 11. 文档同步记录
 
-- [ ] `CONTRIBUTING.md` — 删除「Adding npm dependencies (currently zero)」，改为依赖策略说明
-- [ ] `README.md` — 移除/修订"零依赖"卖点；更新 API 参考、快速上手、模板说明
-- [ ] 新增 `CHANGELOG.md` — 记录 0.2.0 破坏性变更与迁移指引
-- [ ] 新增 `LICENSE` — 当前声明 Apache-2.0 但仓库内无该文件
-- [ ] 从版本控制移除已提交的 `.DS_Store`
-- [ ] `index.js` 头注释指向的 `github.com/lant1ng-1216/eln-app` 返回 404，需确认是否公开
+- [x] `CONTRIBUTING.md` — 已删除「Adding npm dependencies (currently zero)」，改为依赖策略说明
+      （仅 `zod` 为运行时依赖，检索与存储一律适配器）
+- [x] `README.md` — 已移除"零依赖"卖点；API 参考、快速上手、模板、双模式、守卫、成本、智能体均已更新
+- [x] 新增 `CHANGELOG.md` — 0.2.0 破坏性变更、迁移对照表、设计偏离说明与各阶段取舍
+- [x] `LICENSE` — 仓库内已存在 Apache-2.0（commit `7e89f4b`）
+- [x] 已从版本控制移除 `.DS_Store`（并加入 `.gitignore`）
+- [x] `index.js` 头注释已改为指向本仓库 `github.com/lant1ng-1216/eln-core`
+
+## 12. 实现后的目录结构
+
+```
+index.js
+src/
+  contracts/     vocab.js  schema.js  validate.js  types.js
+  state/         canon.js  mind.js  ledger.js  chapter.js  version.js  commit.js
+  mind/          project.js
+  memory/        prose.js  retriever.js  keywords.js  store.js  adapters/
+  orchestration/ director.js  turn.js  repair.js  guard.js  agents.js
+  expression/    compose.js  render.js  packs/{genres,styles,constraints}/
+  transport/     llm-client.js  usage.js
+  runtime.js
+examples/
+test/
+```
+
+与 §8 的差异：新增 `state/chapter.js`（章节收尾判据）、`orchestration/guard.js`（连续性守卫）、
+`orchestration/agents.js`（角色智能体）、`transport/usage.js`（成本记账）、`memory/store.js`
+（世界持久化）。它们都属于 §8 已列出的层，未越出分层规则。
