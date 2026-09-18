@@ -18,6 +18,8 @@
  *     duplicate prose. Connection failures before the first token are retried.
  */
 
+import { UsageTracker, normalizeUsage, estimateTokens } from './usage.js';
+
 /** HTTP statuses worth retrying: transient or rate-limited. */
 const RETRYABLE_STATUS = new Set([408, 409, 425, 429, 500, 502, 503, 504]);
 
@@ -127,6 +129,15 @@ export class LLMClient {
     this.maxRetries = maxRetries;
     this.retryDelay = retryDelay;
     this._fetch = fetchImpl;
+
+    /** Cumulative token usage for this model role. See `transport/usage.js`. */
+    this.usage = new UsageTracker();
+  }
+
+  /** Forget accumulated usage (e.g. to measure a single turn). */
+  resetUsage() {
+    this.usage.reset();
+    return this;
   }
 
   _body(prompt, { maxTokens, stream, model, temperature }) {
@@ -135,7 +146,12 @@ export class LLMClient {
       max_tokens: maxTokens,
       messages: [{ role: 'user', content: prompt }],
     };
-    if (stream) body.stream = true;
+    if (stream) {
+      body.stream = true;
+      // Ask for a trailing usage chunk; providers that ignore it simply omit it
+      // and the caller falls back to an estimate.
+      body.stream_options = { include_usage: true };
+    }
     if (temperature !== undefined) body.temperature = temperature;
     return body;
   }
@@ -206,7 +222,19 @@ export class LLMClient {
     const resp = await this._request(this._body(prompt, { maxTokens, stream: false, model, temperature }), { signal });
     const data = await resp.json();
     if (data.error) throw new LLMError(`[ELN] LLM error: ${data.error.message}`, { retryable: false });
-    return data.choices?.[0]?.message?.content ?? '';
+
+    const content = data.choices?.[0]?.message?.content ?? '';
+    const reported = normalizeUsage(data.usage);
+    if (reported) {
+      this.usage.add(reported);
+    } else {
+      this.usage.add({
+        promptTokens: estimateTokens(prompt),
+        completionTokens: estimateTokens(content),
+        estimated: true,
+      });
+    }
+    return content;
   }
 
   /**
@@ -226,6 +254,7 @@ export class LLMClient {
     const decoder = new TextDecoder();
     const parser = createSSEParser();
     let fullText = '';
+    let reportedUsage = null;
 
     const handle = payload => {
       let json;
@@ -236,6 +265,10 @@ export class LLMClient {
         // than abort the whole turn.
         return;
       }
+      // OpenAI-compatible streams emit usage on the final chunk (choices empty).
+      const usage = normalizeUsage(json.usage);
+      if (usage) reportedUsage = usage;
+
       const delta = json.choices?.[0]?.delta?.content ?? '';
       if (delta) {
         fullText += delta;
@@ -255,6 +288,18 @@ export class LLMClient {
       for (const payload of parser.flush()) handle(payload);
     } finally {
       reader.releaseLock?.();
+    }
+
+    if (reportedUsage) {
+      this.usage.add(reportedUsage);
+    } else {
+      // Streams frequently omit usage; record an explicit estimate rather than
+      // reporting a silent zero.
+      this.usage.add({
+        promptTokens: estimateTokens(prompt),
+        completionTokens: estimateTokens(fullText),
+        estimated: true,
+      });
     }
 
     return fullText;

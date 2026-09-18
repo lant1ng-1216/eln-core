@@ -5,3 +5,4 @@
  */
 
 export * from './llm-client.js';
+export * from './usage.js';

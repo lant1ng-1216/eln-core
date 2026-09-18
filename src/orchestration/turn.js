@@ -25,10 +25,24 @@ import { cloneLedgers, openSeeds, addEvent } from '../state/ledger.js';
 import { maybeCloseChapter } from '../state/chapter.js';
 import { extractWithRepair } from './repair.js';
 import { planBeat } from './director.js';
+import { ContinuityGuard, describeViolations } from './guard.js';
 import { makeIdFactory, currentChapter } from '../state/canon.js';
 
 /** A chapter is "closing" once it has used 80% of its turn budget. */
 const CHAPTER_END_RATIO = 0.8;
+
+/**
+ * Ask for a corrected retelling, carrying the concrete violations back to the
+ * model. Generic advice ("be consistent") is ignored; a named contradiction is
+ * usually fixed.
+ */
+function buildRewritePrompt(narrativePrompt, violations) {
+  return `${narrativePrompt}
+
+---
+你上一次的产出有下列连续性问题，必须修正后**重写整段正文**（只输出小说正文，不要解释）：
+${describeViolations(violations)}`;
+}
 
 /** Raised when a turn fails before commit. The state is untouched. */
 export class TurnFailedError extends Error {
@@ -127,9 +141,12 @@ export async function runTurn({
   onToken,
   onLine,
   onEvent,
+  onRewrite,
+  guard = null,
   buildRetrieved,
   budget = null,
   maxRepair = 1,
+  maxRewrites = 1,
   signal,
   extraNotes = [],
   mentionsOf = null,
@@ -201,11 +218,15 @@ export async function runTurn({
   const narrativePrompt = compose(packs, blocks, { turn: canon.turn + 1 });
 
   // ── 3. Stream the narrative ──
-  let narrativeText;
-  try {
+  //
+  // Tokens are forwarded as they arrive, so a rewrite necessarily reaches the
+  // caller twice. `onRewrite` is the contract for that: a streaming consumer
+  // clears its buffer and re-renders. Buffering the whole passage instead would
+  // trade the product's only real-time feature for a rare correction.
+  const streamOnce = async prompt => {
     const splitter = createLineSplitter(onLine);
-    narrativeText = await narrativeClient.stream(
-      narrativePrompt,
+    const text = await narrativeClient.stream(
+      prompt,
       delta => {
         onToken?.(delta);
         splitter.push(delta);
@@ -213,10 +234,51 @@ export async function runTurn({
       { maxTokens: 3000, signal }
     );
     splitter.flush();
+    return text;
+  };
+
+  const activeGuard = guard ?? new ContinuityGuard();
+
+  let narrativeText;
+  try {
+    narrativeText = await streamOnce(narrativePrompt);
   } catch (error) {
     throw new TurnFailedError(`[ELN] Narrative streaming failed: ${error.message}`, {
       cause: error,
       phase: 'narrative',
+    });
+  }
+
+  // ── 3b. Continuity check, then at most `maxRewrites` corrections ──
+  let continuity = await activeGuard.review({
+    narrative: narrativeText,
+    canon,
+    minds: state.minds,
+    ledgers: state.ledgers,
+    mode,
+    holderId,
+  });
+  let rewrites = 0;
+
+  while (!continuity.ok && rewrites < maxRewrites) {
+    rewrites += 1;
+    onRewrite?.({ attempt: rewrites, violations: continuity.violations });
+
+    try {
+      narrativeText = await streamOnce(buildRewritePrompt(narrativePrompt, continuity.violations));
+    } catch (error) {
+      // A failed rewrite keeps the first attempt rather than failing the turn.
+      continuity = { ...continuity, rewriteError: String(error?.message ?? error) };
+      break;
+    }
+
+    continuity = await activeGuard.review({
+      narrative: narrativeText,
+      canon,
+      minds: state.minds,
+      ledgers: state.ledgers,
+      mode,
+      holderId,
     });
   }
 
@@ -301,6 +363,15 @@ export async function runTurn({
     committed.turnRecord.chapterEnded = closure.from.name;
   }
 
+  // A turn that still contradicts canon after its rewrite is committed anyway —
+  // the prose exists and the state must stay in sync with it — but it is marked
+  // so the caller can surface or reject it.
+  if (!continuity.ok) {
+    committed.turnRecord.continuityWarnings = continuity.violations
+      .filter(v => v.severity === 'error')
+      .map(v => v.detail);
+  }
+
   const nextState = {
     canon: committed.canon,
     minds: committed.minds,
@@ -331,6 +402,13 @@ export async function runTurn({
     summary: committed.turnRecord.summary,
     chapterTransition,
     action: reviewedAction,
+    continuity: {
+      ok: continuity.ok,
+      violations: continuity.violations,
+      rewrites,
+      modelChecked: continuity.modelChecked ?? false,
+      rewriteError: continuity.rewriteError,
+    },
   };
 
   return { state: nextState, turnResult };

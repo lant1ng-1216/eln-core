@@ -20,8 +20,10 @@
  */
 
 import { LLMClient } from './transport/llm-client.js';
+import { diffUsage, sumUsage } from './transport/usage.js';
 import { runTurn as runTurnTransaction } from './orchestration/turn.js';
 import { Director } from './orchestration/director.js';
+import { ContinuityGuard } from './orchestration/guard.js';
 import { canonFromGeneratedWorld, resolveRef, secretsOf, entityByName, cloneCanon } from './state/canon.js';
 import { createMinds, mindFor, adjustTrust, cloneMinds, setTrust } from './state/mind.js';
 import { createLedgers, addSeed } from './state/ledger.js';
@@ -71,8 +73,9 @@ export class ELNRuntime {
       storage,
       retriever = null,
       maxRepair = 1,
+      maxRewrites = 1,
       fetchImpl,
-      onToken, onLine, onTurnEnd, onEvent, onChapterEnd,
+      onToken, onLine, onTurnEnd, onEvent, onChapterEnd, onRewrite,
     } = options;
 
     const clientOpts = { apiKey, apiBase, fetchImpl };
@@ -81,10 +84,13 @@ export class ELNRuntime {
 
     this._narrativeClient = new LLMClient({ ...clientOpts, model: narrativeModel });
     this._extractionClient = new LLMClient({ ...clientOpts, model: extractionModel });
-    // The director's advisory call is optional and never load-bearing, so a
-    // model is only wired up when one is explicitly configured.
+    // The director's and critic's calls are optional and never load-bearing, so
+    // a model is only wired up when one is explicitly configured.
     this._directorClient = models.director
       ? new LLMClient({ ...clientOpts, model: models.director })
+      : null;
+    this._criticClient = models.critic
+      ? new LLMClient({ ...clientOpts, model: models.critic })
       : null;
 
     this._packs = packs;
@@ -99,13 +105,19 @@ export class ELNRuntime {
       client: this._directorClient,
       model: models.director ?? null,
     });
+    this._guard = new ContinuityGuard({
+      client: this._criticClient,
+      model: models.critic ?? null,
+    });
     this._maxRepair = maxRepair;
+    this._maxRewrites = maxRewrites;
 
     this._onToken = onToken ?? null;
     this._onLine = onLine ?? null;
     this._onTurnEnd = onTurnEnd ?? null;
     this._onEvent = onEvent ?? null;
     this._onChapterEnd = onChapterEnd ?? null;
+    this._onRewrite = onRewrite ?? null;
 
     // State
     this._canon = null;
@@ -277,6 +289,8 @@ export class ELNRuntime {
     }
 
     this._isRunning = true;
+    const usageBefore = this._usageSnapshot();
+
     try {
       const { state, turnResult } = await runTurnTransaction({
         state: {
@@ -297,6 +311,9 @@ export class ELNRuntime {
         onToken: this._onToken,
         onLine: this._onLine,
         onEvent: this._onEvent,
+        onRewrite: this._onRewrite,
+        guard: this._guard,
+        maxRewrites: this._maxRewrites,
         buildRetrieved: ({ canon, beatSpec }) => this._buildRetrieved({
           canon,
           beatSpec,
@@ -333,6 +350,9 @@ export class ELNRuntime {
 
       this._directives = {};
       this._chapterHint = '';
+
+      // Attach the observable cost of this turn (DESIGN §9 P4).
+      turnResult.usage = diffUsage(usageBefore, this._usageSnapshot());
 
       if (turnResult.chapterTransition) this._onChapterEnd?.(turnResult.chapterTransition);
       this._onTurnEnd?.(turnResult);
@@ -618,6 +638,39 @@ export class ELNRuntime {
 
   get isRunning() { return this._isRunning; }
   get isWorldLoaded() { return this._canon !== null; }
+
+  /** Cumulative token usage across every model role. */
+  _usageSnapshot() {
+    return sumUsage(
+      this._narrativeClient.usage.snapshot(),
+      this._extractionClient.usage.snapshot(),
+      this._directorClient?.usage.snapshot(),
+      this._criticClient?.usage.snapshot(),
+    );
+  }
+
+  /**
+   * Token usage so far, per model role and in total. `estimated: true` means at
+   * least one figure was inferred because the provider did not report it.
+   */
+  get usage() {
+    const byRole = {
+      narrative: this._narrativeClient.usage.snapshot(),
+      extraction: this._extractionClient.usage.snapshot(),
+    };
+    if (this._directorClient) byRole.director = this._directorClient.usage.snapshot();
+    if (this._criticClient) byRole.critic = this._criticClient.usage.snapshot();
+
+    return { ...this._usageSnapshot(), byRole };
+  }
+
+  /** Forget accumulated usage counters. */
+  resetUsage() {
+    for (const client of [this._narrativeClient, this._extractionClient, this._directorClient, this._criticClient]) {
+      client?.resetUsage();
+    }
+    return this;
+  }
 
   /** The retained prose. Read a past turn with `eln.prose.get(turn)`. */
   get prose() { return this._prose; }

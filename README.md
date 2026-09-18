@@ -27,6 +27,8 @@ Canon（客观真相） ──投影──▶ Mind（各主体私有视角）─
 | **章节自收尾** | 章节按判据收尾：承诺回收的伏笔已回收、目标已达成，或回合预算耗尽。不需要你记得调用 `nextChapter()`。 |
 | **视角可切换** | `director`（全知）与 `character`（有限视角）是同一次投影，只换 `holderId`。切模式不改状态，来回切换无损耗。角色模式不仅过滤情报，还按该角色的错误认知叙述。 |
 | **回合即事务** | 任一步失败则整回合回滚，计数器绝不漂移。 |
+| **连续性守卫** | 抽取之前先查正文：已死亡的角色开口、有限视角写出无从知晓的秘密——确定性检出并打回重写一次。 |
+| **成本可观测** | 每次调用的 token 用量按模型角色记账，区分"服务商上报"与"估算"。 |
 
 **UI 无关 · 题材/文风/存储/检索全部可插拔。**
 
@@ -125,9 +127,11 @@ await eln.generateWorld({ prompt: '三个AI科学家在火星基地，其中一�
 | `onToken` / `onLine` | `(token) => void` | — | 流式回调 |
 | `onTurnEnd` / `onEvent` | `(result) => void` | — | 回合 / 事件回调 |
 | `onChapterEnd` | `({reason, from, to, index}) => void` | — | 章节自动收尾时触发 |
+| `onRewrite` | `({attempt, violations}) => void` | — | 正文被打回重写时触发（见下） |
+| `maxRewrites` | `number` | `1` | 连续性重写次数上限；0 表示只检测不改写 |
 
-> `models.director` 是可选的：配置后会用一个便宜模型补上规则无法决定的"本回合该制造什么阻碍"，
-> 失败也不影响回合。不配置则导演完全走确定性规划。
+> `models.director` 与 `models.critic` 都是可选的：配置后用便宜模型补上规则无法决定的部分
+> （制造什么阻碍 / 语义校对），失败也不影响回合。不配置则完全走确定性路径。
 
 ### 世界与回合
 
@@ -182,6 +186,55 @@ new ELNRuntime({
   },
 })
 ```
+
+### 连续性守卫与重写
+
+抽取之前，引擎先检查正文与设定是否矛盾——**确定性规则为主**，不调模型：
+
+| 规则 | 严重度 | 说明 |
+|---|---|---|
+| `dead_character_speaks` | error | 已死亡的角色在正文里说话 |
+| `secret_leak` | error | character 模式下叙述了该角色无从知晓的秘密 |
+| `unknown_speaker` | info | 出现未登记的发声者（路人合法，仅记录） |
+
+只有 `error` 会触发一次重写，且会把**具体矛盾**带回给模型：
+
+```js
+new ELNRuntime({
+  apiKey,
+  maxRewrites: 1,
+  // 重写会让调用方收到第二遍 token —— 必须清空缓冲重渲染
+  onRewrite: ({ attempt, violations }) => {
+    ui.clearCurrentTurn()
+    console.warn('重写原因:', violations.map(v => v.detail))
+  },
+  onTurnEnd: r => {
+    if (!r.continuity.ok) console.warn('仍未解决:', r.continuity.violations)
+  },
+})
+```
+
+> **流式 + 校验的固有代价**：token 是实时转发的，重写必然让你看到两遍正文。
+> 引擎选择保留实时性，把"如何处理重写"交给 `onRewrite` 契约；
+> 若改为先缓冲全文再校验，就等于放弃流式。
+
+### 成本可观测
+
+```js
+const result = await eln.runTurn()
+result.usage            // { calls, promptTokens, completionTokens, totalTokens, estimated }
+
+eln.usage
+// {
+//   calls: 12, totalTokens: 8421, estimated: true,
+//   byRole: { narrative: {...}, extraction: {...}, director: {...}, critic: {...} }
+// }
+
+eln.resetUsage()
+```
+
+`estimated: true` 表示至少有一项是估算的（服务商未上报，多为流式响应）。
+流式请求会带 `stream_options.include_usage`，上报了就按上报值计。
 
 ### 记忆与检索
 

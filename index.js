@@ -22,6 +22,9 @@ export { ELNRuntime } from './src/runtime.js';
 
 // Transport
 export { LLMClient, LLMError, createSSEParser } from './src/transport/llm-client.js';
+export {
+  UsageTracker, diffUsage, sumUsage, normalizeUsage, estimateTokens,
+} from './src/transport/usage.js';
 
 // Contracts — schemas, validation, vocabularies
 export {
@@ -66,7 +69,11 @@ export {
   PAY_URGENCY_THRESHOLD, ESCALATE_URGENCY, SEED_BUDGET, OVERDUE_AGE,
 } from './src/orchestration/director.js';
 export { runTurn, TurnFailedError } from './src/orchestration/turn.js';
-export { extractWithRepair, buildRepairPrompt } from './src/orchestration/repair.js';
+export { extractWithRepair, buildRepairPrompt, BLOCK_NAMES } from './src/orchestration/repair.js';
+export {
+  ContinuityGuard, createGuard, checkContinuity,
+  extractSpeakers, leakedSecrets, describeViolations,
+} from './src/orchestration/guard.js';
 
 // Memory — adapters, prose retention and retrieval
 export { MemoryStorage, LocalStorageStorage, createDefaultStorage } from './src/memory/adapters/index.js';

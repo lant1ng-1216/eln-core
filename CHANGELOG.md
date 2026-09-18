@@ -50,6 +50,32 @@
   并与既有角色建立双向信任边。玩家只是**普通实体**，没有任何特权通道，因此不存在可泄露的越权信息。
 - **`setMode()` 校验玩家实体** —— 传入未知 `playerEntityId` 时给出可操作报错并保持原模式不变。
 - **玩家行动事件带 `actors`** —— 行动进入账本时记录行动者，不再是孤立事件。
+
+### P4 校验自修复与成本可观测
+
+- **连续性守卫（P4）** —— `ContinuityGuard` 在抽取之前检查正文。**确定性规则为主**：
+  已死亡的角色说话（`dead_character_speaks`，error）、未登记的发声者（`unknown_speaker`，info）、
+  有限视角叙述了该角色无从知晓的秘密（`secret_leak`，error，用 bigram 覆盖率匹配以容忍改写）。
+  只有 `error` 会触发重写。
+- **打回重写（P4）** —— 违反硬约束时携带**具体矛盾**重写一次（`maxRewrites`，默认 1）。
+  重写后仍矛盾则照常提交（正文已存在，状态必须与之一致），但在回合记录上打
+  `continuityWarnings` 并在结果中给出 `continuity.ok = false`。
+- **`models.critic`（P4）** —— 可选的语义校对模型，只能**追加**发现，永远不能推翻确定性判定；
+  失败或输出畸形时静默退回确定性结果。
+- **成本可观测（P4）** —— `UsageTracker` 记录每次调用的 token 用量，区分"服务商上报"与"估算"
+  （`estimated: true`）。`turnResult.usage` 给出单回合用量，`eln.usage` 给出累计与
+  `byRole`（narrative / extraction / director / critic）分解——"抽取走便宜模型"这句成本路由的
+  承诺，现在可以验证。流式请求会发送 `stream_options.include_usage`。
+
+### P4 的取舍说明
+
+- **重写会二次流式输出**。token 是实时转发给调用方的，因此重写必然让调用方看到两遍正文。
+  这是流式 + 校验的固有代价：契约是 `onRewrite({ attempt, violations })`，调用方据此清空缓冲并重渲染；
+  改为先缓冲全文再校验，等于用产品唯一的实时特性换取一次罕见修正。
+- **`unknown_speaker` 只报 `info`**：路人性角色（"跑堂道："）是合法写法，不应强制重写。
+- **`secret_leak` 用 token 覆盖率而非原文包含**判断：正文几乎不会逐字复述秘密的原句
+  （秘密写作"实为地下党联络员"，正文写"他就是地下党联络员"），逐字匹配会漏判。
+  覆盖率阈值 0.6，且短语短于 3 个 token 时退回逐字匹配。
 - **契约层（zod）** —— `contracts/schema.js` 定义全部持久化结构与抽取载荷；
   `validateExtraction()` 提供**分块校验 + 块级降级**：某块非法只废该块，不整回合回滚。
 - **表达层 packs** —— `GenrePack` / `StylePack` / `ConstraintPack` 全部数据驱动。
@@ -110,4 +136,4 @@
 
 ### 尚未实现（后续阶段）
 
-P4 连续性守卫与成本路由 · P5 角色智能体。详见 `DESIGN.md` §9。
+P5 角色智能体。详见 `DESIGN.md` §9。
