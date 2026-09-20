@@ -477,6 +477,117 @@ test('a corrupted save fails loudly at the boundary on load', async () => {
   await assert.rejects(() => second.load('user-5'), /Invalid Canon/);
 });
 
+// ── Chapter criteria: the author-facing controls ─────────────────────────────
+
+test('an author can declare what must happen before a chapter ends', async () => {
+  const { runtime } = makeRuntime();
+  await loadWorld(runtime);
+
+  const seed = runtime.plantSeed('那封信必须送到');
+  const declared = runtime.setChapterCriteria({ seedsToPay: [seed.id] });
+
+  assert.deepEqual(declared, { seedsToPay: [seed.id], goalsToMeet: [] });
+
+  const status = runtime.getChapterCriteria();
+  assert.equal(status.satisfied, false);
+  assert.ok(status.missing.some(m => m.includes('那封信必须送到')));
+  assert.equal(status.threads.planted, 1);
+  assert.equal(status.progress, 0);
+});
+
+test('declared criteria are reported as satisfied once met', async () => {
+  const { runtime } = makeRuntime();
+  await loadWorld(runtime);
+
+  const seed = runtime.plantSeed('那封信必须送到');
+  runtime.setChapterCriteria({ seedsToPay: [seed.id], goalsToMeet: ['找到失踪名单'] });
+  runtime.getState().canon.entities.find(e => e.name === '李明远').goal = '找到失踪名单';
+
+  const status = runtime.getChapterCriteria();
+  assert.equal(status.missing.length, 1, 'only the seed is outstanding');
+
+  seed.status = 'paid';
+  assert.equal(runtime.getChapterCriteria().satisfied, true);
+});
+
+test('criteria can be declared for a specific chapter', async () => {
+  const { runtime } = makeRuntime();
+  await loadWorld(runtime);
+
+  runtime.setChapterCriteria({ goalsToMeet: ['第二章的事'] }, 1);
+  assert.deepEqual(runtime.getState().canon.chapters[1].closeCriteria.goalsToMeet, ['第二章的事']);
+  assert.deepEqual(runtime.getState().canon.chapters[0].closeCriteria.goalsToMeet, []);
+
+  assert.throws(() => runtime.setChapterCriteria({}, 99), /No chapter at index 99/);
+  assert.throws(() => runtime.getChapterCriteria(99), /No chapter at index 99/);
+});
+
+// ── Context budget ───────────────────────────────────────────────────────────
+
+test('a turn reports the size of every prompt it built', async () => {
+  const { runtime } = makeRuntime();
+  await loadWorld(runtime);
+
+  const result = await runtime.runTurn();
+
+  assert.ok(result.promptChars.narrative > 500);
+  assert.ok(result.promptChars.extraction > 500);
+  assert.ok(result.promptChars.context > 0);
+  assert.equal(
+    result.blocks.trace.totalChars,
+    result.promptChars.context,
+    'the reported context size is the assembled blocks'
+  );
+});
+
+test('a context budget caps the assembled context', async () => {
+  const loose = makeRuntime().runtime;
+  await loadWorld(loose);
+
+  const bounded = makeRuntime({ runtimeOpts: { contextBudget: 700 } }).runtime;
+  await loadWorld(bounded);
+
+  const looseResult = await loose.runTurn();
+  const boundedResult = await bounded.runTurn();
+
+  assert.ok(
+    boundedResult.promptChars.context <= looseResult.promptChars.context,
+    `budgeted context should not be larger (${boundedResult.promptChars.context} vs ${looseResult.promptChars.context})`
+  );
+  assert.ok(
+    boundedResult.promptChars.context <= 700 + 120,
+    `and should respect the cap approximately (${boundedResult.promptChars.context})`
+  );
+  assert.equal(boundedResult.turn, 1, 'the turn still completes');
+});
+
+test('the context budget has a default rather than being unbounded', async () => {
+  // Measured over 20 real turns, the assembled context grew ~500% with no sign
+  // of levelling off; an unbounded prompt is a long-session bug waiting to happen.
+  const { runtime } = makeRuntime();
+  assert.equal(typeof runtime.contextBudget, 'number');
+  assert.ok(runtime.contextBudget > 1000);
+
+  const disabled = makeRuntime({ runtimeOpts: { contextBudget: null } }).runtime;
+  assert.equal(disabled.contextBudget, null);
+
+  const custom = makeRuntime({ runtimeOpts: { contextBudget: 4000 } }).runtime;
+  assert.equal(custom.contextBudget, 4000);
+});
+
+test('context size is measurable across turns so growth is visible', async () => {
+  const { runtime } = makeRuntime();
+  await loadWorld(runtime);
+
+  const sizes = [];
+  for (let i = 0; i < 3; i++) {
+    sizes.push((await runtime.runTurn()).promptChars.context);
+  }
+
+  assert.equal(sizes.length, 3);
+  for (const size of sizes) assert.ok(size > 0);
+});
+
 // ── Guards ───────────────────────────────────────────────────────────────────
 
 test('runTurn before loadWorld gives an actionable error', async () => {

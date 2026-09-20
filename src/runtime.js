@@ -31,6 +31,7 @@ import { createMinds, mindFor, adjustTrust, cloneMinds, setTrust } from './state
 import { createLedgers, addSeed } from './state/ledger.js';
 import { applyDelta } from './state/commit.js';
 import { VersionStore } from './state/version.js';
+import { evaluateCloseCriteria, chapterThreads, chapterProgress } from './state/chapter.js';
 import { projectCanon } from './mind/project.js';
 import { openSeeds } from './state/ledger.js';
 import { validateGeneratedWorld } from './contracts/validate.js';
@@ -43,6 +44,13 @@ import { buildWorldGenPrompt } from './expression/compose.js';
 
 const DEFAULT_API_BASE = 'https://api.deepseek.com';
 const DEFAULT_MODEL = 'deepseek-chat';
+
+/**
+ * Characters of assembled context per turn. Roughly 8k tokens for mixed CJK,
+ * which leaves ample room for a long scene while keeping a very long session
+ * from growing without bound. See the trimming priority in `expression/render.js`.
+ */
+const DEFAULT_CONTEXT_BUDGET = 16_000;
 
 export class ELNRuntime {
   /**
@@ -127,6 +135,18 @@ export class ELNRuntime {
     this._autoAgents = options.autoAgents ?? true;
     this._maxRepair = maxRepair;
     this._maxRewrites = maxRewrites;
+    /**
+     * Context budget in characters for the assembled prompt.
+     *
+     * There is a default rather than `null`: measured over 20 real turns, the
+     * assembled context grew ~500% and showed no sign of levelling, so an
+     * unbounded prompt is a long-session bug waiting to happen. The default is
+     * generous enough that ordinary sessions never notice it; pass an explicit
+     * number to tune, or `null` to disable.
+     */
+    this._contextBudget = options.contextBudget === undefined
+      ? DEFAULT_CONTEXT_BUDGET
+      : options.contextBudget;
 
     this._onToken = onToken ?? null;
     this._onLine = onLine ?? null;
@@ -336,7 +356,7 @@ export class ELNRuntime {
           entityIds: beatSpec?.mustAdvance ?? [],
         }),
         mentionsOf: seed => this._mentionCount(seed),
-        budget: null,
+        budget: this._contextBudget,
         maxRepair: this._maxRepair,
         signal,
         extraNotes: this._chapterHint ? [`本章聚焦：${this._chapterHint}`] : [],
@@ -460,8 +480,52 @@ export class ELNRuntime {
   }
 
   /**
-   * Advance to the next chapter. From P2 the engine also closes chapters
-   * automatically; this becomes an override (DESIGN §7 breaking change).
+   * Declare what must happen before a chapter may end.
+   *
+   * The engine can already close a chapter whose planted threads are all
+   * resolved, and will close one whose turn budget runs out. This is for the
+   * case where the author knows the actual condition: "don't end this chapter
+   * until the letter is delivered".
+   *
+   * @param {{seedsToPay?: string[], goalsToMeet?: string[]}} criteria
+   * @param {number} [chapterIndex] - Defaults to the active chapter
+   */
+  setChapterCriteria(criteria = {}, chapterIndex = null) {
+    if (!this._canon) throw new Error('[ELN] No world loaded.');
+    const index = chapterIndex ?? this._canon.chapterIndex;
+    const chapter = this._canon.chapters[index];
+    if (!chapter) throw new Error(`[ELN] No chapter at index ${index}`);
+
+    chapter.closeCriteria = {
+      seedsToPay: criteria.seedsToPay ?? [],
+      goalsToMeet: criteria.goalsToMeet ?? [],
+    };
+    return chapter.closeCriteria;
+  }
+
+  /** Criteria currently declared for a chapter, plus what is still missing. */
+  getChapterCriteria(chapterIndex = null) {
+    if (!this._canon) throw new Error('[ELN] No world loaded.');
+    const index = chapterIndex ?? this._canon.chapterIndex;
+    const chapter = this._canon.chapters[index];
+    if (!chapter) throw new Error(`[ELN] No chapter at index ${index}`);
+
+    const evaluation = evaluateCloseCriteria(this._canon, this._ledgers, chapter);
+    const threads = chapterThreads(this._canon, this._ledgers, chapter);
+
+    return {
+      closeCriteria: chapter.closeCriteria,
+      satisfied: evaluation.satisfied,
+      missing: evaluation.missing,
+      threads,
+      progress: chapterProgress(chapter),
+    };
+  }
+
+  /**
+   * Advance to the next chapter. The engine also closes chapters on its own
+   * criteria and thread resolution; this remains as an override
+   * (DESIGN §7 breaking change).
    * @returns {boolean} false when the story has no further chapters
    */
   nextChapter(hint = '') {
@@ -741,6 +805,9 @@ export class ELNRuntime {
     }
     return this;
   }
+
+  /** Resolved context budget in characters; `null` means unbounded. */
+  get contextBudget() { return this._contextBudget; }
 
   /** The retained prose. Read a past turn with `eln.prose.get(turn)`. */
   get prose() { return this._prose; }

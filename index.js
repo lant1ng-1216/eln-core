@@ -42,13 +42,14 @@ export {
 export { createMinds, mindFor, stanceOn, knowsFact, addKnowledge, adjustTrust } from './src/state/mind.js';
 export {
   createLedgers, addEvent, addSeed, paySeed, openSeeds, seedsByUrgency,
-  computeUrgency, eventsOnTurn, linkCausality,
+  computeUrgency, eventsOnTurn, linkCausality, abandonSeed,
+  sweepStaleSeeds, ABANDON_AGE,
 } from './src/state/ledger.js';
 export { VersionStore } from './src/state/version.js';
 export { applyDelta } from './src/state/commit.js';
 export {
   maybeCloseChapter, closeChapter, evaluateCloseCriteria,
-  chapterBudgetExhausted, chapterProgress,
+  chapterBudgetExhausted, chapterProgress, chapterThreads,
 } from './src/state/chapter.js';
 
 // Mind — perspective projection

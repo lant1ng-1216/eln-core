@@ -76,6 +76,8 @@ export function closeChapter(canon, ledgers, { reason = '' } = {}) {
 
   current.status = 'done';
   following.status = 'active';
+  // The next chapter starts on the turn about to be written.
+  following.startedTurn = next.turn + 1;
   next.chapterIndex = idx + 1;
   next.tension = Math.max(5, Math.round(next.tension * 0.6));
 
@@ -90,20 +92,63 @@ export function closeChapter(canon, ledgers, { reason = '' } = {}) {
 }
 
 /**
+ * Did this chapter resolve the threads it planted?
+ *
+ * This is the criteria source that works without an author declaring anything:
+ * a chapter whose secrets and promises have all been paid off has told the story
+ * it opened, so it may end. Without it, criteria-driven closing was unreachable
+ * in practice — every real run closed on the turn budget alone, because nothing
+ * ever populated `closeCriteria`.
+ *
+ * @returns {{planted: number, open: number, resolved: boolean, openTexts: string[]}}
+ */
+export function chapterThreads(canon, ledgers, chapter = currentChapter(canon)) {
+  const empty = { planted: 0, open: 0, resolved: false, openTexts: [] };
+  if (!chapter) return empty;
+
+  const start = chapter.startedTurn ?? 1;
+  const planted = (ledgers?.seeds ?? []).filter(
+    s => s.plantedTurn >= start && s.plantedTurn <= canon.turn
+  );
+  const open = planted.filter(s => s.status === 'open');
+
+  return {
+    planted: planted.length,
+    open: open.length,
+    resolved: planted.length > 0 && open.length === 0,
+    openTexts: open.map(s => s.text),
+  };
+}
+
+/**
  * Close the chapter if it is ready. The engine calls this after every commit,
  * which is what removes the manual `nextChapter()` step from the loop.
  *
  * @param {Object} [options]
  * @param {boolean} [options.editorSuggested] - The extractor's `suggest_close_chapter`
+ * @param {number} [options.minProgressForThreads] - Don't end a chapter early just
+ *   because its threads resolved quickly; a story needs room to breathe
  * @returns {{canon: object, closed: boolean, reason: string}}
  */
-export function maybeCloseChapter(canon, ledgers, { editorSuggested = false } = {}) {
+export function maybeCloseChapter(
+  canon,
+  ledgers,
+  { editorSuggested = false, minProgressForThreads = 0.5 } = {}
+) {
   const chapter = currentChapter(canon);
   if (!chapter) return { canon, closed: false, reason: '' };
 
   const criteria = evaluateCloseCriteria(canon, ledgers, chapter);
   if (criteria.declared && criteria.satisfied) {
     return closeChapter(canon, ledgers, { reason: 'criteria' });
+  }
+
+  // Implicit criteria: the chapter paid off everything it planted. Gated on
+  // progress so a chapter that resolves one quick thread on its second turn is
+  // not cut short.
+  const threads = chapterThreads(canon, ledgers, chapter);
+  if (threads.resolved && chapterProgress(chapter) >= minProgressForThreads) {
+    return closeChapter(canon, ledgers, { reason: 'threads_resolved' });
   }
 
   if (chapterBudgetExhausted(chapter)) {

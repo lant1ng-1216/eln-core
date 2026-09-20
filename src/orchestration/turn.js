@@ -216,6 +216,7 @@ export async function runTurn({
   });
 
   const narrativePrompt = compose(packs, blocks, { turn: canon.turn + 1 });
+  const narrativePromptChars = narrativePrompt.length;
 
   // ── 3. Stream the narrative ──
   //
@@ -394,6 +395,15 @@ export async function runTurn({
     turn: committed.canon.turn,
     /** The persisted record for this turn (also appended to `state.turns`). */
     turnRecord: committed.turnRecord,
+    /**
+     * Prompt sizes, so growth over a long session is measurable rather than
+     * something you discover when the context window overflows.
+     */
+    promptChars: {
+      narrative: narrativePromptChars,
+      extraction: extractionPrompt.length,
+      context: blocks.trace?.totalChars ?? 0,
+    },
     narrativeText,
     blocks,
     beatSpec,

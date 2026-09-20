@@ -134,6 +134,11 @@ await eln.generateWorld({ prompt: '三个AI科学家在火星基地，其中一�
 | `maxAgents` | `number` | `2` | 每回合最多几个角色在幕后行动 |
 | `tensionBand` | `number` | `20` | 张力观测值相对导演目标的允许偏差（死区） |
 | `tensionCurve` | `{start,end}` | `{25,70}` | 一章内的张力弧线量程 |
+| `contextBudget` | `number \| null` | `16000` | 上下文组装块的字符预算；`null` 关闭 |
+
+> `contextBudget` 有默认值而非不限：实测 20 回合上下文增长 +497% 且无收敛迹象。
+> 超预算时按优先级裁剪：检索摘录 → 伏笔账本 → 事实列表 → 剧情回顾 → 最后才动角色与世界。
+> 用 `turnResult.promptChars` / `blocks.trace.blockChars` 观测增长。
 
 > `models.director` / `models.critic` / `models.agent` 都是可选的：配置后用便宜模型补上规则
 > 无法决定的部分（制造什么阻碍 / 语义校对 / 幕后行动），**失败都不影响回合**。
@@ -331,6 +336,30 @@ eln.branch({ from: versionId })     // 从某版本派生新世界线
 eln.checkout(versionId)             // 切回某版本（canon + minds + ledgers 一并还原）
 eln.history()                       // 当前世界线的版本链
 ```
+
+### 章节何时结束
+
+引擎自己决定，不需要你调 `nextChapter()`。四个判据按顺序检查：
+
+| 原因 | 条件 |
+|---|---|
+| `criteria` | 你声明的 `closeCriteria` 全部满足 |
+| `threads_resolved` | **本章埋下的伏笔全部结清**（pay 或 abandon），且进度 ≥50% |
+| `budget` | 回合预算耗尽 |
+| `editor` | 抽取器建议收尾，且进度 ≥80% |
+
+`threads_resolved` 是让长篇"有作者感"的那一条——读者会感到作者记得。声明更精确的条件：
+
+```js
+eln.plantSeed('那封信必须送到')
+eln.setChapterCriteria({ seedsToPay: ['sd_authored_1'], goalsToMeet: ['找到失踪名单'] })
+
+eln.getChapterCriteria()
+// { closeCriteria, satisfied, missing, threads: {planted, open, resolved}, progress }
+```
+
+被彻底遗忘的伏笔不会永远卡住章节：超过 30 回合仍未回收的线会被标为 `abandoned`
+（`turnRecord.abandonedSeeds` 会列出），从而不再阻挡 `threads_resolved`。
 
 ### 存档
 

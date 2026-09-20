@@ -202,16 +202,87 @@ test('seeds are a director-only artefact', () => {
   assert.equal(character.seedsBlock, '', 'a character cannot see the author’s ledger');
 });
 
-test('the character budget drops retrieval excerpts before anything else', () => {
+test('the character budget sheds the least important context first', () => {
   const state = makeState();
   const retrieved = [{ turn: 1, text: '一段很长很长的旧事摘录'.repeat(20) }];
 
   const loose = assembleContext({ canon: state.canon, minds: state.minds, retrieved });
   assert.match(loose.memoryBlock, /相关旧事/);
 
-  const tight = assembleContext({ canon: state.canon, minds: state.minds, retrieved, budget: 200 });
+  // A budget that fits only once the excerpts are gone: they must go first, and
+  // the recent summaries — which carry continuity — must survive.
+  const withoutExcerpts = assembleContext({ canon: state.canon, minds: state.minds });
+  const budget = withoutExcerpts.trace.totalChars + 10;
+
+  const tight = assembleContext({ canon: state.canon, minds: state.minds, retrieved, budget });
   assert.ok(!tight.memoryBlock.includes('相关旧事'), 'excerpts are the first thing to go');
-  assert.ok(tight.memoryBlock.includes('近期剧情'), 'recent summaries survive');
+  assert.match(tight.memoryBlock, /近期剧情/, 'recent summaries survive');
+  assert.ok(tight.trace.totalChars <= budget, `result fits the budget (${tight.trace.totalChars} <= ${budget})`);
+});
+
+test('under real pressure the ledger is trimmed before the world is', () => {
+  const state = makeState();
+  for (let i = 0; i < 12; i++) {
+    state.ledgers.seeds.push({
+      id: `sd_${i}`, plantedTurn: 0, text: `第 ${i} 条伏笔的说明文字`, kind: 'question',
+      holderIds: [], status: 'open', urgency: 0.9 - i * 0.05,
+    });
+  }
+
+  const loose = assembleContext({ canon: state.canon, minds: state.minds, ledgers: state.ledgers });
+  const seedLines = loose.seedsBlock.split('\n').length - 1;
+  assert.ok(seedLines >= 12, 'all threads listed with room to spare');
+
+  const tight = assembleContext({
+    canon: state.canon, minds: state.minds, ledgers: state.ledgers,
+    budget: loose.trace.totalChars - 200,
+  });
+
+  assert.ok(tight.seedsBlock.includes('另有'), 'the ledger is trimmed, with a count of what was left out');
+  assert.ok(tight.seedsBlock.split('\n').length - 1 < seedLines);
+  assert.ok(tight.canonBlock.includes('【世界背景】'), 'the world survives the ledger being cut');
+  assert.ok(tight.trace.totalChars < loose.trace.totalChars);
+});
+
+test('the world and character sheets are the last things cut', () => {
+  const state = makeState();
+  const squeezed = assembleContext({
+    canon: state.canon, minds: state.minds, budget: 600,
+  });
+
+  assert.ok(squeezed.canonBlock.length > 0, 'canon is never emptied while other blocks exist');
+  assert.ok(squeezed.trace.totalChars <= 600 + 80, `approximately fits (${squeezed.trace.totalChars})`);
+});
+
+test('the director’s secret list is capped, because it drove prompt growth', () => {
+  const state = makeState();
+  // Simulate a long session: many established secrets accumulated over time.
+  for (let i = 0; i < 30; i++) {
+    state.canon.facts.push({
+      id: `f_secret_${i}`, subject: 'e1', predicate: 'secret', predicate_raw: 'secret',
+      object: `第 ${i} 条设定内容`, turn: i, salience: 0.5, tags: ['secret'],
+    });
+  }
+
+  const blocks = assembleContext({ canon: state.canon, minds: state.minds, mode: 'director' });
+  const listed = blocks.knowledgeBlock.split('\n').filter(l => l.startsWith('- '));
+
+  assert.equal(listed.length, 12, 'only the most recent are listed');
+  assert.match(blocks.knowledgeBlock, /另有 21 条更早的设定未列出/);
+  assert.match(blocks.knowledgeBlock, /第 29 条设定内容/, 'the newest is listed');
+  assert.ok(!blocks.knowledgeBlock.includes('第 0 条设定内容'), 'the oldest is summarised away');
+});
+
+test('block sizes are reported so prompt growth is measurable', () => {
+  const state = makeState();
+  const blocks = assembleContext({ canon: state.canon, minds: state.minds });
+
+  assert.equal(typeof blocks.trace.totalChars, 'number');
+  assert.ok(blocks.trace.blockChars.canonBlock > 0);
+  assert.equal(
+    Object.values(blocks.trace.blockChars).reduce((a, b) => a + b, 0),
+    blocks.trace.totalChars
+  );
 });
 
 // ── Prompt builders ──────────────────────────────────────────────────────────

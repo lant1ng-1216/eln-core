@@ -65,15 +65,32 @@ function renderCanonBlock(view) {
   ].join('\n');
 }
 
+/**
+ * How many established secrets the director's prompt lists. Beyond this the
+ * block is summarised with a count.
+ *
+ * This was the measured driver of prompt growth: an extraction that tags facts
+ * `secret` liberally (it does) means the block grew every turn, and over 20
+ * turns the assembled context grew ~500% with no sign of levelling off. The
+ * recent ones are the ones a scene is likely to touch.
+ */
+const SECRETS_LISTED = 12;
+
 /** Facts the holder holds, split by stance so uncertainty is legible. */
 function renderKnowledgeBlock(view) {
   if (view.mode === 'director') {
     const secrets = view.canon.facts.filter(f => f.tags.includes('secret'));
     if (!secrets.length) return '';
-    const lines = secrets.map(f => {
-      const who = view.canon.entities.find(e => e.id === f.subject)?.name ?? f.subject;
-      return `- ${who}：${f.object}`;
-    });
+
+    const nameOf = id => view.canon.entities.find(e => e.id === id)?.name ?? id;
+    // Most recent first: a long-running story's newest revelations are the ones
+    // in play; the ancient ones are background the model can infer.
+    const shown = [...secrets].sort((a, b) => b.turn - a.turn).slice(0, SECRETS_LISTED);
+    const lines = shown.map(f => `- ${nameOf(f.subject)}：${f.object}`);
+
+    const hidden = secrets.length - shown.length;
+    if (hidden > 0) lines.push(`（另有 ${hidden} 条更早的设定未列出）`);
+
     return `【客观设定·全部底牌】\n${lines.join('\n')}`;
   }
 
@@ -193,31 +210,66 @@ function renderBeatBlock(beatSpec, canon, ledgers) {
   return `【本回合戏剧任务】\n${lines.join('\n')}`;
 }
 
+/** Keep at most this many ledger lines when trimming under budget pressure. */
+const SEED_LINES_UNDER_PRESSURE = 5;
+
 /**
- * Trim blocks to a character budget. Retrieval excerpts are dropped first
- * (they are the most expendable), then the memory block is truncated.
- * A pluggable trimming strategy is a P1 concern; P0 ships this deterministic one.
+ * Trim blocks to a character budget.
+ *
+ * The order is a deliberate priority, cheapest-to-lose first: retrieval excerpts,
+ * then the ledger (a long list of threads, of which the most urgent few still
+ * carry the signal), then the fact lists, then the story-so-far, and only as a
+ * last resort the character sheets and world — which are what the scene is
+ * actually made of.
+ *
+ * Without this wiring the budget was unreachable from the public API and a long
+ * run grew its prompt unbounded. Sizes are observable via `trace.blockChars`.
  */
 function fitBudget(blocks, budget) {
   const limit = typeof budget === 'number' ? budget : budget?.chars;
   if (!limit) return blocks;
 
   const out = { ...blocks };
-  const size = b => Object.values(b).reduce((n, s) => n + (s?.length ?? 0), 0);
+  const size = () => Object.values(out).reduce((n, s) => n + (typeof s === 'string' ? s.length : 0), 0);
 
-  if (size(out) <= limit) return out;
+  if (size() <= limit) return out;
 
-  // 1. Drop retrieved excerpts.
-  out.memoryBlock = out.memoryBlock.split('\n【相关旧事】')[0];
+  // 1. Retrieved prose excerpts — nice to have, and the most verbose per unit
+  //    of value.
+  if (out.memoryBlock?.includes('【相关旧事】')) {
+    out.memoryBlock = out.memoryBlock.split('\n【相关旧事】')[0];
+  }
+  if (size() <= limit) return out;
 
-  // 2. Truncate the canon block as a last resort.
-  if (size(out) > limit) {
-    const excess = size(out) - limit;
-    if (out.canonBlock.length > excess) {
-      out.canonBlock = out.canonBlock.slice(0, out.canonBlock.length - excess) + '…';
+  // 2. The ledger, trimmed to its most urgent lines.
+  if (out.seedsBlock) {
+    const lines = out.seedsBlock.split('\n');
+    if (lines.length - 1 > SEED_LINES_UNDER_PRESSURE) {
+      out.seedsBlock = [
+        ...lines.slice(0, 1 + SEED_LINES_UNDER_PRESSURE),
+        `（另有 ${lines.length - 1 - SEED_LINES_UNDER_PRESSURE} 条次要伏笔未列出）`,
+      ].join('\n');
     }
   }
+  if (size() <= limit) return out;
+
+  // 3. The fact lists, then the story-so-far.
+  for (const key of ['knowledgeBlock', 'memoryBlock']) {
+    if (size() <= limit) return out;
+    out[key] = truncateTo(out[key], size() - limit);
+  }
+  if (size() <= limit) return out;
+
+  // 4. Last resort: the character sheets and world.
+  out.canonBlock = truncateTo(out.canonBlock, size() - limit);
   return out;
+}
+
+/** Remove `excess` characters from the end of a block, marking the cut. */
+function truncateTo(text, excess) {
+  if (!text || excess <= 0) return text;
+  if (text.length <= excess) return '';
+  return `${text.slice(0, text.length - excess)}…（已按上下文预算截断）`;
 }
 
 /**
@@ -273,6 +325,17 @@ export function assembleContext({
     hiddenSecretIds: hiddenSecrets(view).map(f => f.id),
     /** Which past turns retrieval resurfaced — lets a caller verify "it looked back". */
     retrievedTurns: (retrieved ?? []).map(r => r.turn),
+    /**
+     * Per-block character counts, so prompt growth over a long session is
+     * measurable rather than something you discover when the context overflows.
+     */
+    blockChars: Object.fromEntries(
+      Object.entries(fitted)
+        .filter(([, v]) => typeof v === 'string')
+        .map(([k, v]) => [k, v.length])
+    ),
+    totalChars: Object.values(fitted)
+      .reduce((n, v) => n + (typeof v === 'string' ? v.length : 0), 0),
   };
 
   return fitted;

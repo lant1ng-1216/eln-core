@@ -90,6 +90,33 @@ export function abandonSeed(ledgers, seedId) {
 }
 
 /**
+ * Threads left open this long are given up on.
+ *
+ * Not every planted thread gets paid. Without a sweep, a forgotten one stays
+ * `open` forever: it keeps appearing in the director's ledger, and it silently
+ * blocks any chapter that waits for its threads to resolve. Abandoning it is the
+ * honest record — the author moved on.
+ */
+export const ABANDON_AGE = 30;
+
+/**
+ * Abandon threads that have outlived any plausible payoff window.
+ * Deterministic; called from the commit path so it is part of the transaction.
+ *
+ * @returns {string[]} ids of newly abandoned seeds
+ */
+export function sweepStaleSeeds(ledgers, { currentTurn, maxAge = ABANDON_AGE } = {}) {
+  const abandoned = [];
+  for (const seed of ledgers.seeds) {
+    if (seed.status !== 'open') continue;
+    if (currentTurn - seed.plantedTurn < maxAge) continue;
+    seed.status = 'abandoned';
+    abandoned.push(seed.id);
+  }
+  return abandoned;
+}
+
+/**
  * Deterministic urgency in [0, 1].
  *
  * A seed gets urgent as it ages, as it keeps being mentioned, and as the

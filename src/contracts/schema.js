@@ -86,6 +86,15 @@ export const ChapterStateSchema = z.object({
   targetTurns: z.number().int().positive().default(5),
   completedTurns: z.number().int().nonnegative().default(0),
   status: z.enum(CHAPTER_STATUSES).default('locked'),
+  /**
+   * The turn this chapter began on. Needed to answer "which threads belong to
+   * this chapter?" — a chapter that resolves the seeds it planted can close on
+   * that basis rather than only on its turn budget.
+   *
+   * Defaults to 0, not 1: anything planted before the first turn (author setup,
+   * a seed declared at load time) belongs to the opening chapter.
+   */
+  startedTurn: z.number().int().nonnegative().default(0),
   beats: z.array(BeatSchema).default([]),
   closeCriteria: CloseCriteriaSchema.default({}),
 });

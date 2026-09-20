@@ -215,12 +215,21 @@ ${predicateList}
 - 不要凭空推断角色知道全部真相；不知道就省略。
 
 篇幅上限（超出会导致输出被截断、整回合抽取失败）：
-- facts 最多 6 条，events 最多 4 条，seeds 最多 2 条，characters 只列本回合有变化的。
+- facts 最多 6 条，events 最多 4 条，characters 只列本回合有变化的。
 - evidence 是不超过 15 字的原文片段，不要整句照抄。
 - 未发生变化的世界字段（location/time/tension 之一）可以省略。
 
+seeds 的纪律（重要）：
+- seeds 是**留给后文回收**的伏笔，不是本回合发生的事——后者属于 events。
+- 大多数回合**不该有新伏笔**，seeds 为空是正常的。
+- 一回合最多 1 条，且必须满足：叙事里明确埋下了物件、承诺、身份疑云或预言，
+  且后文回收它会让读者觉得"原来如此"。
+- 只是角色有了新目标、气氛变紧张、出现一般性疑问——这些都不是 seeds。
+- 若确实要埋，格式为 {"text":"伏笔内容","kind":"${SEED_KINDS.join('|')}","holderIds":["角色名"]}；
+  以下示例中 seeds 为空数组，正是大多数回合应有的样子。
+
 只返回合法JSON，不含任何其他文字：
-{"summary":"一句话摘要","world":{"location":"地点","time":"时间","tension":60},"characters":[{"name":"角色名","emotion":"新情绪词","goal":"目标变化或原目标","alive":true,"trust_changes":{"他人名":5}}],"facts":[{"subject":"角色名","predicate":"secret","predicate_raw":"原文","object":"内容","tags":["secret"],"salience":0.8,"evidence":"支撑该事实的原文短句"}],"events":[{"kind":"action","actors":["角色名"],"location":"地点","time":"时间","summary":"发生了什么"}],"seeds":[{"text":"埋下的伏笔","kind":"${SEED_KINDS.join('|')}","holderIds":["角色名"]}],"seed_payoffs":[{"seedId":"sd_tN_M"}],"knowledge":[{"holderId":"角色名","factIndex":0,"stance":"knows"}],"reveals_secret":[{"from":"名","to":"名","content":"内容"}],"editor":{"chapter_progress":0.6,"suggest_close_chapter":false,"note":"15字内评语"}}`;
+{"summary":"一句话摘要","world":{"location":"地点","time":"时间","tension":60},"characters":[{"name":"角色名","emotion":"新情绪词","goal":"目标变化或原目标","alive":true,"trust_changes":{"他人名":5}}],"facts":[{"subject":"角色名","predicate":"secret","predicate_raw":"原文","object":"内容","tags":["secret"],"salience":0.8,"evidence":"支撑该事实的原文短句"}],"events":[{"kind":"action","actors":["角色名"],"location":"地点","time":"时间","summary":"发生了什么"}],"seeds":[],"seed_payoffs":[{"seedId":"sd_tN_M"}],"knowledge":[{"holderId":"角色名","factIndex":0,"stance":"knows"}],"reveals_secret":[{"from":"名","to":"名","content":"内容"}],"editor":{"chapter_progress":0.6,"suggest_close_chapter":false,"note":"15字内评语"}}`;
 }
 
 export { GENRE_KEYS, PREDICATE_KEYS };

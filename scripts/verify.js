@@ -42,6 +42,9 @@ ELN Core — 真实模型效果验证
   --apiBase=<url>        API 地址（默认 https://api.deepseek.com）
   --model=<name>         模型名（默认 deepseek-chat）
   --turns=<n>            长程记忆场景的回合数（默认 6，至少 5 才能触发章节收尾）
+                         长测建议 20~30：6 回合证明不了"长篇"这个前提
+  --contextBudget=<n>    上下文组装块的字符预算（默认不限）。长测时建议设置，
+                         否则提示词随伏笔与事实累积而无限增长
   --genres=a,b,c         文风场景要验的题材（默认 republican,xianxia）
   --all-genres           验全部 6 种题材（调用量翻倍）
   --only=a,b,c           只跑指定场景: style,memory,perspective,guard,agents
@@ -68,6 +71,7 @@ function parseArgs(argv) {
     genres: ['republican', 'xianxia'],
     only: null,
     agents: true,
+    contextBudget: null,
   };
 
   for (const arg of argv) {
@@ -77,6 +81,7 @@ function parseArgs(argv) {
       case '--apiBase': opts.apiBase = value ?? opts.apiBase; break;
       case '--model': opts.model = value ?? opts.model; break;
       case '--turns': opts.turns = Number(value) || opts.turns; break;
+      case '--contextBudget': opts.contextBudget = Number(value) || null; break;
       case '--genres': opts.genres = (value ?? '').split(',').map(s => s.trim()).filter(Boolean); break;
       case '--all-genres': opts.genres = ['ancient', 'republican', 'mystery', 'xianxia', 'campus', 'apocalypse']; break;
       case '--only': opts.only = (value ?? '').split(',').map(s => s.trim()).filter(Boolean); break;
@@ -201,6 +206,10 @@ async function scenarioMemory(opts) {
     genre: 'republican',
     options: {
       models: baseModels(opts),
+      // A long run needs a bounded prompt: the ledger and fact lists grow every
+      // turn, and without a cap the failure mode is a context overflow, not a
+      // bad story.
+      contextBudget: opts.contextBudget,
       onTurnEnd: r => marks.push(r),
     },
   });
@@ -222,13 +231,16 @@ async function scenarioMemory(opts) {
   console.log(`章节数: ${world.chapters.length}｜每章预算: ${runtime.getState().canon.chapters[0].targetTurns} 回合`);
   console.log(`第 1 回合注入: ${plantedAction}\n`);
 
-  console.log('回合  张力(实际→目标)  导演回收  检索到旧回合  章节  导演介入');
-  console.log('─'.repeat(80));
+  console.log('回合  张力(实际→目标)  回收  检索旧  上下文  伏笔(开/总)  章节  导演介入');
+  console.log('─'.repeat(96));
 
   let firstTransition = null;
   let retrievalTurn = null;
   let degradedTurns = 0;
   let clampedTurns = 0;
+  let abandonedTotal = 0;
+  const contextSizes = [];
+  const closeReasons = {};
 
   for (let i = 0; i < opts.turns; i++) {
     const result = await runtime.runTurn({
@@ -242,20 +254,58 @@ async function scenarioMemory(opts) {
 
     const retrieved = result.blocks.trace.retrievedTurns ?? [];
     if (retrieved.length) retrievalTurn = retrievalTurn ?? { turn: result.turn, from: retrieved };
-    if (result.chapterTransition && !firstTransition) firstTransition = result.chapterTransition;
+    if (result.chapterTransition) {
+      firstTransition = firstTransition ?? result.chapterTransition;
+      const reason = result.chapterTransition.reason;
+      closeReasons[reason] = (closeReasons[reason] ?? 0) + 1;
+    }
 
-    // The commit reports when the director's intent overruled the model's reading.
     const clamp = result.turnRecord?.tensionClamp;
     if (clamp) clampedTurns += 1;
+    abandonedTotal += result.turnRecord?.abandonedSeeds?.length ?? 0;
+
+    const contextChars = result.promptChars?.context ?? 0;
+    contextSizes.push(contextChars);
+
+    const seeds = runtime.listSeeds({ status: null });
+    const openCount = seeds.filter(s => s.status === 'open').length;
 
     console.log(
       `${String(result.turn).padStart(4)}  `
       + `${String(actual).padStart(3)} → ${String(target).padStart(3)}      `
-      + `${String(beat.plantOrPay.length).padStart(2)}        `
-      + `${(retrieved.length ? retrieved.join(',') : '-').padEnd(14)}`
-      + `${(result.chapterTransition ? `收尾(${result.chapterTransition.reason})` : '').padEnd(14)}`
-      + `${clamp ? `${clamp.observed}→${clamp.applied}（带 ±${clamp.band}）` : ''}`
+      + `${String(beat.plantOrPay.length).padStart(2)}    `
+      + `${(retrieved.length ? retrieved.join(',') : '-').padEnd(7)}`
+      + `${String(contextChars).padStart(6)}  `
+      + `${`${openCount}/${seeds.length}`.padStart(10)}  `
+      + `${(result.chapterTransition ? `收尾(${result.chapterTransition.reason})` : '').padEnd(16)}`
+      + `${clamp ? `${clamp.observed}→${clamp.applied}` : ''}`
     );
+  }
+
+  // ── Context growth ──
+  // The reason a budget exists: a long session must not grow its prompt without
+  // bound. Printed so the trend is visible rather than discovered at overflow.
+  console.log('');
+  const firstSize = contextSizes[0];
+  const lastSize = contextSizes[contextSizes.length - 1];
+  const growth = firstSize ? ((lastSize - firstSize) / firstSize) * 100 : 0;
+  const trend = `上下文组装块: 第 1 回合 ${firstSize} → 末回合 ${lastSize} 字符（${growth >= 0 ? '+' : ''}${growth.toFixed(0)}%）`;
+  console.log(`  ${trend}`);
+
+  const budget = opts.contextBudget;
+  if (budget) {
+    const over = contextSizes.filter(c => c > budget * 1.2).length;
+    if (over === 0) {
+      pass('context', `上下文预算 ${budget} 字符全程生效（峰值 ${Math.max(...contextSizes)}）`);
+    } else {
+      fail('context', `有 ${over} 个回合超出上下文预算 ${budget} 的 120%`,
+        contextSizes.map((c, i) => `回合${i + 1}: ${c}`).join('\n'));
+    }
+  } else if (growth > 150) {
+    fail('context', `上下文在 ${opts.turns} 回合内增长 ${growth.toFixed(0)}%，且未设置预算`,
+      `${trend}\n长会话会撞上下文窗口。设置 --contextBudget=<字符数> 或调小预算。`);
+  } else {
+    pass('context', `上下文增长在可接受范围（${growth >= 0 ? '+' : ''}${growth.toFixed(0)}%）`);
   }
 
   const state = runtime.getState();
@@ -313,8 +363,19 @@ async function scenarioMemory(opts) {
   // ── P2: chapter closed itself ──
   console.log('');
   if (firstTransition) {
-    pass('p2', `章节自行收尾（未调用 nextChapter）：${firstTransition.from} → ${firstTransition.to}，原因 ${firstTransition.reason}`);
+    const reasons = Object.entries(closeReasons).map(([r, n]) => `${r}×${n}`).join(', ');
+    pass('p2', `章节自行收尾（未调用 nextChapter）：${firstTransition.from} → ${firstTransition.to}（原因：${reasons}）`);
     if (state.canon.chapterIndex > 0) pass('p2', `章节游标已推进到第 ${state.canon.chapterIndex + 1} 章`);
+
+    // Which criteria actually fired is the interesting part: 'budget' means the
+    // engine merely ran out of turns, while 'threads_resolved' / 'criteria' mean
+    // the chapter ended because its promises were kept.
+    if (closeReasons.criteria || closeReasons.threads_resolved) {
+      pass('p2', '至少有一章因「承诺已兑现」而收尾，而非仅靠回合耗尽');
+    } else {
+      read('p2', '本次所有章节都靠回合耗尽收尾',
+        '判据收尾未触发。若伏笔多于回合数，属正常；否则说明伏笔回收速度跟不上。');
+    }
   } else {
     fail('p2', '整轮跑完章节仍未收尾',
       `每章预算 5 回合，已跑 ${opts.turns} 回合；检查 maybeCloseChapter 是否被跳过`);

@@ -15,7 +15,9 @@
 
 import { cloneCanon, makeIdFactory, resolveRef, secretsOf } from './canon.js';
 import { cloneMinds, mindFor, addKnowledge, adjustTrust } from './mind.js';
-import { cloneLedgers, addEvent, addSeed, paySeed, seedById, recomputeUrgency } from './ledger.js';
+import {
+  cloneLedgers, addEvent, addSeed, paySeed, seedById, recomputeUrgency, sweepStaleSeeds,
+} from './ledger.js';
 import { BeatSchema } from '../contracts/schema.js';
 
 /** Clamp `v` into [lo, hi]. */
@@ -220,6 +222,11 @@ export function applyDelta({
   // ages but never gains a mention bonus.
   recomputeUrgency(ledgers, { currentTurn: turn, nearChapterEnd, mentionsOf: mentionsOf ?? undefined });
 
+  // Give up on threads that have outlived any plausible payoff window, so a
+  // forgotten one neither haunts the ledger forever nor blocks a chapter that
+  // waits for its threads to resolve.
+  const abandonedSeeds = sweepStaleSeeds(ledgers, { currentTurn: turn });
+
   const turnRecord = {
     turn,
     chapter: canon.chapterIndex,
@@ -230,6 +237,7 @@ export function applyDelta({
   // Observable: when the director had to overrule the model's reading, say so
   // rather than letting the value change with no explanation.
   if (tensionClamp) turnRecord.tensionClamp = tensionClamp;
+  if (abandonedSeeds.length) turnRecord.abandonedSeeds = abandonedSeeds;
 
   return {
     canon,

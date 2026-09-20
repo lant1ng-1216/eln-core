@@ -13,12 +13,12 @@ import assert from 'node:assert/strict';
 import { ELNRuntime } from '../src/runtime.js';
 import {
   chapterBudgetExhausted, chapterProgress,
-  evaluateCloseCriteria, closeChapter, maybeCloseChapter,
+  evaluateCloseCriteria, closeChapter, maybeCloseChapter, chapterThreads,
 } from '../src/state/chapter.js';
 import {
   Director, PAY_URGENCY_THRESHOLD, SEED_BUDGET, OVERDUE_AGE,
 } from '../src/orchestration/director.js';
-import { addSeed, recomputeUrgency } from '../src/state/ledger.js';
+import { addSeed, recomputeUrgency, paySeed, abandonSeed, ABANDON_AGE } from '../src/state/ledger.js';
 import { applyDelta } from '../src/state/commit.js';
 import { tensionTargetFor, TENSION_BAND } from '../src/orchestration/director.js';
 import { MemoryStorage } from '../src/memory/adapters/memory-storage.js';
@@ -177,6 +177,134 @@ test('an early editor suggestion is ignored, a late one is honoured', () => {
 
   state.canon.chapters[0].completedTurns = 4; // 4/5 = 0.8
   assert.equal(maybeCloseChapter(state.canon, state.ledgers, { editorSuggested: true }).closed, true);
+});
+
+// ── Implicit criteria: a chapter that resolved its own threads ───────────────
+
+test('chapterThreads counts only the threads this chapter planted', () => {
+  const state = makeState();
+  state.canon.turn = 5;
+  state.canon.chapters[0].startedTurn = 3; // chapter began on turn 3
+
+  const inChapter = addSeed(state.ledgers, { id: 'sd_in', plantedTurn: 4, text: '本章的线' });
+  addSeed(state.ledgers, { id: 'sd_before', plantedTurn: 1, text: '上一章的线' });
+
+  const threads = chapterThreads(state.canon, state.ledgers);
+
+  assert.equal(threads.planted, 1, 'an earlier chapter’s thread does not count');
+  assert.equal(threads.open, 1);
+  assert.equal(threads.resolved, false);
+
+  inChapter.status = 'paid';
+  assert.equal(chapterThreads(state.canon, state.ledgers).resolved, true);
+});
+
+test('a chapter with no threads at all does not count as resolved', () => {
+  const state = makeState();
+  state.canon.turn = 3;
+  const threads = chapterThreads(state.canon, state.ledgers);
+
+  assert.equal(threads.planted, 0);
+  assert.equal(threads.resolved, false, 'nothing to resolve is not the same as resolved');
+});
+
+test('a chapter closes on its own threads once they are all paid', () => {
+  const state = makeState();
+  state.canon.chapters[0].completedTurns = 3; // >= 50% of the 5-turn budget
+  const seed = addSeed(state.ledgers, { id: 'sd_1', plantedTurn: 1, text: '那封信' });
+  seed.status = 'paid';
+  state.canon.turn = 3;
+
+  const out = maybeCloseChapter(state.canon, state.ledgers);
+
+  assert.equal(out.closed, true);
+  assert.equal(out.reason, 'threads_resolved');
+});
+
+test('resolving a thread too early does not cut the chapter short', () => {
+  const state = makeState();
+  state.canon.chapters[0].completedTurns = 1; // only 20% through
+  const seed = addSeed(state.ledgers, { id: 'sd_1', plantedTurn: 1, text: '那封信' });
+  seed.status = 'paid';
+  state.canon.turn = 1;
+
+  const out = maybeCloseChapter(state.canon, state.ledgers);
+
+  assert.equal(out.closed, false, 'a story needs room to breathe');
+});
+
+test('one unresolved thread keeps the chapter open', () => {
+  const state = makeState();
+  state.canon.chapters[0].completedTurns = 4;
+  const paid = addSeed(state.ledgers, { id: 'sd_paid', plantedTurn: 1, text: 'A' });
+  addSeed(state.ledgers, { id: 'sd_open', plantedTurn: 1, text: 'B' });
+  paid.status = 'paid';
+  state.canon.turn = 3;
+
+  const out = maybeCloseChapter(state.canon, state.ledgers);
+  assert.equal(out.closed, false);
+});
+
+test('an abandoned thread no longer blocks the chapter', () => {
+  const state = makeState();
+  state.canon.chapters[0].completedTurns = 4;
+  const seed = addSeed(state.ledgers, { id: 'sd_1', plantedTurn: 1, text: '被放弃的线' });
+  seed.status = 'abandoned';
+  state.canon.turn = 3;
+
+  const out = maybeCloseChapter(state.canon, state.ledgers);
+  assert.equal(out.closed, true, 'giving up on a thread must unblock the chapter');
+  assert.equal(out.reason, 'threads_resolved');
+});
+
+test('closing a chapter records when the next one started', () => {
+  const state = makeState();
+  state.canon.turn = 4;
+  state.canon.chapters[0].completedTurns = 5;
+
+  const out = maybeCloseChapter(state.canon, state.ledgers);
+
+  assert.equal(out.closed, true);
+  assert.equal(out.canon.chapters[1].startedTurn, 5, 'next chapter begins on the next turn');
+});
+
+// ── Stale-seed sweep ─────────────────────────────────────────────────────────
+
+test('threads are abandoned once they outlive any plausible payoff window', () => {
+  const state = makeState();
+  state.canon.turn = ABANDON_AGE + 5;
+  addSeed(state.ledgers, { id: 'sd_old', plantedTurn: 1, text: '早就该收的线' });
+  addSeed(state.ledgers, { id: 'sd_new', plantedTurn: state.canon.turn - 1, text: '刚埋的线' });
+
+  const out = applyDelta({
+    canon: state.canon, minds: state.minds, ledgers: state.ledgers,
+    delta: { summary: '一回合' },
+  });
+
+  const byId = Object.fromEntries(out.ledgers.seeds.map(s => [s.id, s.status]));
+  assert.equal(byId.sd_old, 'abandoned');
+  assert.equal(byId.sd_new, 'open');
+  assert.deepEqual(out.turnRecord.abandonedSeeds, ['sd_old'], 'the sweep is reported');
+});
+
+test('a paid thread is never abandoned', () => {
+  const state = makeState();
+  state.canon.turn = ABANDON_AGE + 5;
+  const seed = addSeed(state.ledgers, { id: 'sd_paid', plantedTurn: 1, text: 'A' });
+  seed.status = 'paid';
+
+  const out = applyDelta({ canon: state.canon, minds: state.minds, ledgers: state.ledgers, delta: {} });
+  assert.equal(out.ledgers.seeds[0].status, 'paid');
+  assert.equal(out.turnRecord.abandonedSeeds, undefined);
+});
+
+test('paySeed and abandonSeed are idempotent against each other', () => {
+  const state = makeState();
+  const seed = addSeed(state.ledgers, { id: 'sd_1', plantedTurn: 0, text: 'A' });
+
+  assert.equal(paySeed(state.ledgers, 'sd_1', 5), true);
+  assert.equal(abandonSeed(state.ledgers, 'sd_1'), false, 'a paid thread cannot be abandoned');
+  assert.equal(seed.status, 'paid');
 });
 
 // ── Director: seeds ──────────────────────────────────────────────────────────
